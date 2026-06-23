@@ -46,6 +46,9 @@ export class TaskEngine {
 	 * persisted snapshot and `byFile` is empty, so a mutation must reconcile first
 	 * or `rebuildFlat` would wipe the list. */
 	private hydratedOnly = false;
+	/** The single in-flight reconcile, if any — so concurrent callers share one
+	 * scan instead of racing two wholesale `byFile` reassignments. */
+	private reconcilePromise: Promise<void> | null = null;
 
 	private undoStack: LineEdit[][] = [];
 	private redoStack: LineEdit[][] = [];
@@ -87,6 +90,19 @@ export class TaskEngine {
 	 * the snapshot paint) and by the manual refresh / settings-change paths.
 	 */
 	async reconcile(): Promise<void> {
+		// Single-flight: a mutation's hydrated guard (or a manual refresh) that
+		// fires while a reconcile is running joins the in-flight scan rather than
+		// starting a second one whose wholesale `byFile =` would clobber an
+		// interleaved updateFile splice.
+		if (!this.reconcilePromise) {
+			this.reconcilePromise = this.runReconcile().finally(() => {
+				this.reconcilePromise = null;
+			});
+		}
+		return this.reconcilePromise;
+	}
+
+	private async runReconcile(): Promise<void> {
 		const end = perfStart("engine.reconcile (scanVault)");
 		const { entries, errors } = await scanVault(this.app, this.settings);
 		this.byFile = new Map(entries.map((entry) => [entry.path, entry]));

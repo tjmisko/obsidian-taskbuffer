@@ -28,8 +28,10 @@ export interface FileCandidateInfo {
  */
 export function openCharsFromSettings(settings: TaskbufferSettings): string[] | null {
 	const match = settings.formats.checkbox.open.match(/\[(.?)\]/);
-	if (!match) return null;
-	return [match[1] ?? ""]; // capture is " " for "[ ]", "" for "[]"
+	const glyph = match?.[1] ?? "";
+	// No bracket slot, or an empty one ("- []"): Obsidian never reports task === "",
+	// so fall back to "any task list item" rather than under-include.
+	return glyph === "" ? null : [glyph];
 }
 
 /**

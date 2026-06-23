@@ -39,6 +39,11 @@ describe("openCharsFromSettings", () => {
 		const settings = makeSettings((s) => (s.formats.checkbox.open = "TODO:"));
 		expect(openCharsFromSettings(settings)).toBeNull();
 	});
+
+	it("should return null (any-task fallback) for an empty bracket slot", () => {
+		const settings = makeSettings((s) => (s.formats.checkbox.open = "- []"));
+		expect(openCharsFromSettings(settings)).toBeNull();
+	});
 });
 
 // ── isProjectFile ─────────────────────────────────────────────────────────────
