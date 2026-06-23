@@ -1,10 +1,11 @@
 // view.ts — the Task Buffer custom views. A virtualized, 100%-keyboard list:
-// horizon-bucketed tasks render as compact single-line rows, but only the rows
-// in (and just around) the viewport are ever in the DOM, so render time is
-// constant no matter how many thousand tasks the vault holds. The selected
-// task's full body, tags, and parsed marker history show in a pinned detail
-// strip. Two concrete views share this base: a compact sidebar dock view and a
-// roomy full-page (main-area) view.
+// horizon-bucketed tasks render as compact rows of a fixed, uniform height (the
+// body is vertically centered and may wrap to two lines), but only the rows in
+// (and just around) the viewport are ever in the DOM, so render time is constant
+// no matter how many thousand tasks the vault holds. The selected task's full
+// body, tags, and parsed marker history show in a pinned detail strip. Two
+// concrete views share this base: a compact sidebar dock view and a roomy
+// full-page (main-area) view.
 
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import { TaskEngine } from "./engine";

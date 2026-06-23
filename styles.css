@@ -1,8 +1,10 @@
 /* Task Buffer view. Virtualized, 100%-keyboard. The list is a scrolling viewport
    whose rows are absolutely positioned inside a full-height sizer — only the rows
    near the viewport are ever in the DOM, so render time is constant at any task
-   count. Rows are single-line (uniform height, required for exact virtualization);
-   the selected task's full detail + parsed history lives in a pinned strip below.
+   count. Rows are a FIXED two-line-tall height (uniform, required for exact
+   virtualization): the body is vertically centered and may wrap to two lines so a
+   medium-length task stays readable, clamping with an ellipsis beyond that. The
+   selected task's full detail + parsed history lives in a pinned strip below.
    All colors come from theme variables so themes/snippets win. Two layouts share
    these rules: `.is-sidebar` (compact dock) and `.is-full` (roomy main area). */
 
@@ -81,7 +83,7 @@
 	font-size: var(--font-ui-small);
 }
 
-/* ── rows (absolutely positioned, single-line, uniform height) ────────────── */
+/* ── rows (absolutely positioned, fixed two-line height) ──────────────────── */
 
 .taskbuffer-row {
 	position: absolute;
@@ -96,7 +98,14 @@
 	border-left: 2px solid transparent;
 	cursor: default;
 	overflow: hidden;
-	white-space: nowrap;
+	/* Fixed height = two body lines (line-height 1.3) + vertical padding, so the
+	   list stays uniformly virtualized while the body may wrap to two lines. Keep
+	   the 2.6 factor in sync with -webkit-line-clamp on .taskbuffer-body. */
+	height: calc(2.6 * var(--font-ui-small) + 2 * var(--size-4-1));
+}
+
+.taskbuffer-view.is-full .taskbuffer-row {
+	height: calc(2.6 * var(--font-ui-medium) + 2 * var(--size-4-1));
 }
 
 .taskbuffer-row:hover {
@@ -116,8 +125,12 @@
 .taskbuffer-body {
 	flex: 1 1 auto;
 	min-width: 0;
+	/* Wrap up to two lines, then ellipsize. The two-line cap keeps row height
+	   uniform; the row's align-items:center vertically centers a single line. */
+	display: -webkit-box;
+	-webkit-box-orient: vertical;
+	-webkit-line-clamp: 2;
 	overflow: hidden;
-	text-overflow: ellipsis;
 	color: var(--text-normal);
 	font-size: var(--font-ui-small);
 	line-height: 1.3;
