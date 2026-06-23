@@ -8,7 +8,7 @@ import { TaskbufferSettings } from "./config";
 import { Task } from "./types";
 import { buildParseContext, ParseContext, replaceInlineDueDate } from "./parse/parse";
 import { CurrentTask, formatMarker } from "./state";
-import { scanVault, fileForPath } from "./scan";
+import { scanVault, readFileEntry, fileForPath, FileEntry } from "./scan";
 import { summarizeDateErrors } from "./errors";
 import { buildSections, collectTags, DisplaySection, RenderOptions } from "./render/rows";
 import { parseFrontmatterDue } from "./frontmatter";
@@ -36,6 +36,10 @@ export class TaskEngine {
 	private app: App;
 	private timer: TimerStore;
 	settings: TaskbufferSettings;
+
+	/** Per-file source of truth (Pillar B/C); the flat `tasks` list is derived. */
+	private byFile = new Map<string, FileEntry>();
+	/** Derived flat list (regular tasks, then synthetic project tasks). */
 	tasks: Task[] = [];
 
 	private undoStack: LineEdit[][] = [];
@@ -59,12 +63,61 @@ export class TaskEngine {
 
 	async refresh(): Promise<void> {
 		const end = perfStart("engine.refresh (scanVault)");
-		const { tasks, errors } = await scanVault(this.app, this.settings);
-		this.tasks = tasks;
-		end({ tasks: tasks.length });
+		const { entries, errors } = await scanVault(this.app, this.settings);
+		this.byFile = new Map(entries.map((entry) => [entry.path, entry]));
+		this.rebuildFlat();
+		end({ tasks: this.tasks.length, files: this.byFile.size });
 		if (this.settings.strict && errors.length > 0) {
 			new Notice(summarizeDateErrors(errors), 8000);
 		}
+	}
+
+	/**
+	 * Re-read ONE file and splice it into the per-file cache (Pillar C). Removes
+	 * the entry when the file is gone or yields no tasks. Verbs call this for the
+	 * single file they touched instead of rescanning the whole vault.
+	 */
+	async updateFile(path: string): Promise<void> {
+		const end = perfStart("engine.updateFile");
+		const file = fileForPath(this.app, path);
+		if (!file) {
+			this.removeFile(path);
+			end({ file: path, removed: true });
+			return;
+		}
+		const ctx = this.ctx;
+		const entry = await readFileEntry(this.app, file, ctx, this.settings);
+		if (entry.enriched.length > 0) this.byFile.set(entry.path, entry);
+		else this.byFile.delete(entry.path);
+		this.rebuildFlat();
+		end({ file: entry.path, fileTasks: entry.enriched.length, tasks: this.tasks.length });
+		const errors = ctx.dateErrors ?? [];
+		if (this.settings.strict && errors.length > 0) {
+			new Notice(summarizeDateErrors(errors), 8000);
+		}
+	}
+
+	/** Drop a file's entry from the cache (delete / rename-away). */
+	removeFile(path: string): void {
+		if (this.byFile.delete(path)) this.rebuildFlat();
+	}
+
+	/**
+	 * Derive the flat task list from the per-file cache. Regular tasks come first
+	 * (file order), then synthetic project tasks — matching the order the full
+	 * scan produced, so the view, `allTags`, and snapshots stay stable regardless
+	 * of how byFile was assembled (full scan vs. incremental updates).
+	 */
+	private rebuildFlat(): void {
+		const regular: Task[] = [];
+		const projects: Task[] = [];
+		for (const entry of this.byFile.values()) {
+			for (const task of entry.enriched) {
+				if (task.sortLast) projects.push(task);
+				else regular.push(task);
+			}
+		}
+		this.tasks = regular.concat(projects);
 	}
 
 	sections(opts: RenderOptions): DisplaySection[] {
@@ -102,14 +155,14 @@ export class TaskEngine {
 		const ctx = this.ctx;
 		const now = this.nowEpoch();
 		if (await this.transform(task.filePath, (c) => actions.completeAt(c, task.lineNumber, ctx, now))) {
-			await this.refresh();
+			await this.updateFile(task.filePath);
 		}
 	}
 
 	async check(task: Task): Promise<void> {
 		const ctx = this.ctx;
 		if (await this.transform(task.filePath, (c) => actions.check(c, task.lineNumber, ctx))) {
-			await this.refresh();
+			await this.updateFile(task.filePath);
 		}
 	}
 
@@ -117,7 +170,7 @@ export class TaskEngine {
 		const ctx = this.ctx;
 		const now = this.nowEpoch();
 		if (await this.transform(task.filePath, (c) => actions.defer(c, task.lineNumber, ctx, now))) {
-			await this.refresh();
+			await this.updateFile(task.filePath);
 		}
 	}
 
@@ -125,14 +178,14 @@ export class TaskEngine {
 		const ctx = this.ctx;
 		const now = this.nowEpoch();
 		if (await this.transform(task.filePath, (c) => actions.irrelevant(c, task.lineNumber, ctx, now))) {
-			await this.refresh();
+			await this.updateFile(task.filePath);
 		}
 	}
 
 	async unsetIrrelevant(task: Task): Promise<void> {
 		const ctx = this.ctx;
 		if (await this.transform(task.filePath, (c) => actions.unset(c, task.lineNumber, ctx))) {
-			await this.refresh();
+			await this.updateFile(task.filePath);
 		}
 	}
 
@@ -149,7 +202,9 @@ export class TaskEngine {
 		if (ok) {
 			await this.timer.set({ startTime: now, name: task.body, filePath: task.filePath, lineNumber: task.lineNumber });
 			new Notice(`Started: ${task.body}`);
-			await this.refresh();
+			// Stopping an existing timer wrote to its file too; update both.
+			if (existing && existing.filePath !== task.filePath) await this.updateFile(existing.filePath);
+			await this.updateFile(task.filePath);
 		}
 	}
 
@@ -167,7 +222,7 @@ export class TaskEngine {
 		}
 		await this.appendStop(ct, this.nowEpoch());
 		new Notice(`Stopped: ${ct.name}`);
-		await this.refresh();
+		await this.updateFile(ct.filePath);
 	}
 
 	async completeTimer(): Promise<void> {
@@ -182,7 +237,7 @@ export class TaskEngine {
 		if (ok) {
 			await this.timer.set(null);
 			new Notice(`Completed: ${ct.name}`);
-			await this.refresh();
+			await this.updateFile(ct.filePath);
 		}
 	}
 
@@ -208,7 +263,7 @@ export class TaskEngine {
 			await this.transform(path, (c) => (header ? mutate.insertAfterHeader(c, header, line) : mutate.appendToFile(c, line)));
 		}
 		new Notice(`Added: ${body.trim()}`);
-		await this.refresh();
+		await this.updateFile(path);
 	}
 
 	private async ensureParentFolder(path: string): Promise<void> {
@@ -257,7 +312,7 @@ export class TaskEngine {
 		});
 		if (edit) {
 			this.pushUndo([edit]);
-			await this.refresh();
+			await this.updateFile(task.filePath);
 			return true;
 		}
 		return false;
@@ -280,7 +335,7 @@ export class TaskEngine {
 			fm[dueKey] = this.fmDueString(addDays(parsed.epoch, deltaDays), parsed.time);
 			changed = true;
 		});
-		if (changed) await this.refresh();
+		if (changed) await this.updateFile(task.filePath);
 		else new Notice("No due date to shift");
 	}
 
@@ -291,10 +346,16 @@ export class TaskEngine {
 		await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
 			fm[dueKey] = formatEpoch(todayEpoch(), "%Y-%m-%d");
 		});
-		await this.refresh();
+		await this.updateFile(task.filePath);
 	}
 
 	// ── undo / redo (date edits only) ───────────────────────────────────────────
+
+	/** Re-read each distinct file touched by a batch of edits (undo/redo). */
+	private async updateEditedFiles(edits: LineEdit[]): Promise<void> {
+		const paths = new Set(edits.map((e) => e.filePath));
+		for (const path of paths) await this.updateFile(path);
+	}
 
 	private pushUndo(edits: LineEdit[]): void {
 		this.undoStack.push(edits);
@@ -317,7 +378,7 @@ export class TaskEngine {
 		}
 		if (await this.applyEdits(edits, "undo")) {
 			this.redoStack.push(edits);
-			await this.refresh();
+			await this.updateEditedFiles(edits);
 		} else {
 			this.undoStack.push(edits); // restore on failure
 		}
@@ -331,7 +392,7 @@ export class TaskEngine {
 		}
 		if (await this.applyEdits(edits, "redo")) {
 			this.undoStack.push(edits);
-			await this.refresh();
+			await this.updateEditedFiles(edits);
 		} else {
 			this.redoStack.push(edits);
 		}

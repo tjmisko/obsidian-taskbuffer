@@ -178,7 +178,7 @@ function mergeFrontmatterTags(taskTags: string[], frontmatterTags: string[]): st
  * gated by requireTags), has a frontmatter due, is NOT in a done status, and the
  * due parses to a valid date.
  */
-function buildProjectTask(file: FileMeta, cfg: ResolvedFrontmatterConfig): Task | null {
+export function buildProjectTask(file: FileMeta, cfg: ResolvedFrontmatterConfig): Task | null {
 	const fm = file.frontmatter;
 	if (!fm) return null;
 
@@ -208,104 +208,113 @@ function buildProjectTask(file: FileMeta, cfg: ResolvedFrontmatterConfig): Task 
 	};
 }
 
+// ── per-file enrichment (passes 1–3 for one file's own tasks) ─────────────────
+
+/**
+ * Apply passes 1–3 (tag inheritance → completion filtering → due inheritance) to
+ * a SINGLE file's raw tasks and return the enriched regular tasks. The synthetic
+ * project task (pass 4) is NOT included — call {@link projectTaskFor} for that.
+ *
+ * Every pass reads ONLY this file's own frontmatter, so the result is identical
+ * to the slice of {@link enrichTasks} for this file. This per-file purity is what
+ * makes single-file re-parsing correct (not approximate) for incremental scans.
+ *
+ * Input Task objects are not mutated — each is shallow-copied with a fresh tags
+ * array, and its `filePath` is pinned to `meta.path`.
+ */
+export function enrichFileTasks(raw: Task[], meta: FileMeta, settings: TaskbufferSettings): Task[] {
+	const cfg = resolveConfig(settings);
+	const fm = meta.frontmatter;
+	const fileTags = fmTags(fm);
+
+	let tasks: Task[] = raw.map((task) => ({ ...task, filePath: meta.path, tags: [...task.tags] }));
+
+	// 1. tag inheritance ------------------------------------------------------
+	if (fileTags.length > 0) {
+		for (const task of tasks) {
+			task.tags = mergeFrontmatterTags(task.tags, fileTags);
+		}
+	}
+
+	// 2. completion filtering (BEFORE due inheritance) ------------------------
+	// Drop UNDATED tasks when this file has BOTH a frontmatter due AND a done
+	// status. Inline-dated tasks always survive. If inheritance ran first, every
+	// undated task in a done file would acquire a date and survive.
+	if (fm) {
+		const hasDue = fmDueRaw(fm, cfg.dueKey) !== null;
+		const status = fmString(fm, cfg.statusKey).toLowerCase();
+		if (hasDue && cfg.doneSet.has(status)) {
+			tasks = tasks.filter((task) => task.dueDate !== null);
+		}
+	}
+
+	// 3. due inheritance ------------------------------------------------------
+	// File-level inputs (the FM due and the require-tags gate) are constant for
+	// the file, so resolve them once and apply to each undated task.
+	if (cfg.inheritDue) {
+		const dueRaw = fmDueRaw(fm, cfg.dueKey);
+		if (dueRaw !== null) {
+			let allowed = true;
+			if (cfg.requireTags.length > 0) {
+				// ALL required tags must be in the FILE's FM tags (independent of
+				// any task's merged tags).
+				const fileTagSet = new Set(fileTags);
+				allowed = cfg.requireTags.every((tag) => fileTagSet.has(tag));
+			}
+			const parsed = allowed ? parseFrontmatterDue(dueRaw) : null;
+			if (parsed) {
+				for (const task of tasks) {
+					if (task.dueDate !== null) continue; // inline due always wins
+					task.dueDate = parsed.epoch;
+					if (parsed.time !== "") {
+						task.dueTime = parsed.time;
+					}
+				}
+			}
+		}
+	}
+
+	return tasks;
+}
+
+/**
+ * Pass 4 for a single file: its synthetic SortLast project task, or null. Thin
+ * settings-resolving wrapper over {@link buildProjectTask}.
+ */
+export function projectTaskFor(meta: FileMeta, settings: TaskbufferSettings): Task | null {
+	return buildProjectTask(meta, resolveConfig(settings));
+}
+
 // ── entry point ───────────────────────────────────────────────────────────────
 
 /**
- * Apply the four enrichment passes (IN ORDER) and return the enriched task list
- * INCLUDING synthetic project tasks. Input Task objects are not mutated — each
- * task is shallow-copied with a fresh tags array before enrichment.
+ * Apply the four enrichment passes (IN ORDER) across all files and return the
+ * enriched task list INCLUDING synthetic project tasks. Implemented as a thin
+ * loop over {@link enrichFileTasks} / {@link projectTaskFor}: regular tasks come
+ * first in `tasksByFile` order, then ALL synthetic project tasks in `files`
+ * order — preserving the reference pipeline's "regular tasks, then project
+ * tasks" output ordering. Input Task objects are not mutated.
  */
 export function enrichTasks(
 	tasksByFile: Map<string, Task[]>,
 	files: FileMeta[],
 	settings: TaskbufferSettings,
 ): Task[] {
-	const cfg = resolveConfig(settings);
+	const metaByPath = new Map<string, FileMeta>();
+	for (const file of files) metaByPath.set(file.path, file);
 
-	const frontmatterByPath = new Map<string, Record<string, unknown> | null>();
-	for (const file of files) {
-		frontmatterByPath.set(file.path, file.frontmatter);
-	}
-	const tagsForPath = (path: string): string[] =>
-		fmTags(frontmatterByPath.get(path) ?? null);
-
-	// Flatten, copying so we never mutate caller-owned task objects.
-	let tasks: Task[] = [];
+	const out: Task[] = [];
+	// Regular tasks (passes 1–3), per file, in tasksByFile insertion order.
 	for (const [path, fileTasks] of tasksByFile) {
-		for (const task of fileTasks) {
-			tasks.push({ ...task, filePath: path, tags: [...task.tags] });
+		const meta = metaByPath.get(path) ?? { path, basename: "", frontmatter: null };
+		for (const task of enrichFileTasks(fileTasks, meta, settings)) {
+			out.push(task);
 		}
 	}
-
-	// 1. tag inheritance ------------------------------------------------------
-	for (const task of tasks) {
-		const frontmatterTags = tagsForPath(task.filePath);
-		if (frontmatterTags.length > 0) {
-			task.tags = mergeFrontmatterTags(task.tags, frontmatterTags);
-		}
-	}
-
-	// 2. completion filtering (BEFORE due inheritance) ------------------------
-	// Drop UNDATED tasks whose file has BOTH a frontmatter due AND a done
-	// status. Inline-dated tasks always survive. If inheritance ran first,
-	// every undated task in a done file would acquire a date and survive.
-	const completedFile = new Map<string, boolean>();
-	const checkedFile = new Set<string>();
-	const kept: Task[] = [];
-	for (const task of tasks) {
-		if (task.dueDate !== null) {
-			kept.push(task); // inline-dated always kept
-			continue;
-		}
-		const path = task.filePath;
-		if (!checkedFile.has(path)) {
-			checkedFile.add(path);
-			const fm = frontmatterByPath.get(path) ?? null;
-			if (fm) {
-				const hasDue = fmDueRaw(fm, cfg.dueKey) !== null;
-				const status = fmString(fm, cfg.statusKey).toLowerCase();
-				if (hasDue && cfg.doneSet.has(status)) {
-					completedFile.set(path, true); // BOTH due AND done required
-				}
-			}
-		}
-		if (!completedFile.get(path)) {
-			kept.push(task);
-		}
-	}
-	tasks = kept;
-
-	// 3. due inheritance ------------------------------------------------------
-	if (cfg.inheritDue) {
-		for (const task of tasks) {
-			if (task.dueDate !== null) continue; // inline due always wins
-			const fm = frontmatterByPath.get(task.filePath) ?? null;
-			const dueRaw = fmDueRaw(fm, cfg.dueKey);
-			if (dueRaw === null) continue;
-
-			if (cfg.requireTags.length > 0) {
-				// ALL required tags must be in the FILE's FM tags (independent of
-				// the task's merged tags).
-				const fileTags = new Set(tagsForPath(task.filePath));
-				if (!cfg.requireTags.every((tag) => fileTags.has(tag))) continue;
-			}
-
-			const parsed = parseFrontmatterDue(dueRaw);
-			if (!parsed) continue; // ignore invalid (calendar or format)
-			task.dueDate = parsed.epoch;
-			if (parsed.time !== "") {
-				task.dueTime = parsed.time;
-			}
-		}
-	}
-
-	// 4. synthetic project tasks (appended last) ------------------------------
+	// Synthetic project tasks (pass 4), appended last, in `files` order.
 	for (const file of files) {
-		const projectTask = buildProjectTask(file, cfg);
-		if (projectTask) {
-			tasks.push(projectTask);
-		}
+		const projectTask = projectTaskFor(file, settings);
+		if (projectTask) out.push(projectTask);
 	}
-
-	return tasks;
+	return out;
 }

@@ -1,6 +1,12 @@
 import { describe, it, expect } from "vitest";
 
-import { enrichTasks, parseFrontmatterDue, type FileMeta } from "../src/frontmatter";
+import {
+	enrichTasks,
+	enrichFileTasks,
+	projectTaskFor,
+	parseFrontmatterDue,
+	type FileMeta,
+} from "../src/frontmatter";
 import { DEFAULT_SETTINGS, type TaskbufferSettings, type FrontmatterConfig } from "../src/config";
 import { ymdToEpoch } from "../src/dates";
 import type { Task, TaskStatus } from "../src/types";
@@ -335,5 +341,64 @@ describe("parseFrontmatterDue", () => {
 
 	it("should reject a non-date string", () => {
 		expect(parseFrontmatterDue("not a date")).toBeNull();
+	});
+});
+
+// ── 9. per-file enrichment parity (the incremental-scan refactor invariant) ──
+
+describe("enrichFileTasks / projectTaskFor parity", () => {
+	it("should equal the regular-task slice of enrichTasks for a single file", () => {
+		const settings = makeSettings();
+		const file = makeFile("p.md", { due: "2026-04-15", tags: ["work"], status: "open" });
+		const tasks = [
+			makeTask("p.md", "undated"),
+			makeTask("p.md", "inline-dated", { dueDate: ymdToEpoch(2026, 1, 1), lineNumber: 2 }),
+		];
+
+		const viaFile = enrichFileTasks(tasks, file, settings);
+		const viaAll = enrichTasks(new Map([[file.path, tasks]]), [file], settings).filter((t) => !t.sortLast);
+
+		expect(viaFile).toEqual(viaAll);
+	});
+
+	it("should match enrichTasks' synthetic project task via projectTaskFor", () => {
+		const settings = makeSettings();
+		const file = makeFile("proj.md", { tags: ["project"], due: "2026-05-01" });
+
+		const viaHelper = projectTaskFor(file, settings);
+		const viaAll = enrichTasks(new Map(), [file], settings).filter((t) => t.sortLast);
+
+		expect(viaHelper ? [viaHelper] : []).toEqual(viaAll);
+	});
+
+	it("should return null from projectTaskFor when the file is not a project", () => {
+		const settings = makeSettings();
+		expect(projectTaskFor(makeFile("plain.md", { tags: ["work"], due: "2026-04-15" }), settings)).toBeNull();
+		expect(projectTaskFor(makeFile("none.md", null), settings)).toBeNull();
+	});
+
+	it("should reconstruct enrichTasks output by concatenating per-file enrichment (regulars, then projects)", () => {
+		const settings = makeSettings();
+		const f1 = makeFile("a.md", { due: "2026-04-15", tags: ["work"] });
+		const f2 = makeFile("b.md", { tags: ["project"], due: "2026-05-01" }); // project-only file
+		const f3 = makeFile("c.md", { status: "done", due: "2026-04-15" }); // completed → undated dropped
+		const t1 = [makeTask("a.md", "a1"), makeTask("a.md", "a2", { dueDate: ymdToEpoch(2026, 3, 3), lineNumber: 2 })];
+		const t3 = [makeTask("c.md", "c-undated"), makeTask("c.md", "c-dated", { dueDate: ymdToEpoch(2026, 2, 2), lineNumber: 2 })];
+		const byFile = new Map([
+			["a.md", t1],
+			["c.md", t3],
+		]);
+		const files = [f1, f2, f3];
+
+		const regulars = [
+			...enrichFileTasks(t1, f1, settings),
+			...enrichFileTasks(t3, f3, settings),
+		];
+		const projects = files
+			.map((f) => projectTaskFor(f, settings))
+			.filter((p): p is NonNullable<typeof p> => p !== null);
+		const reconstructed = [...regulars, ...projects];
+
+		expect(reconstructed).toEqual(enrichTasks(byFile, files, settings));
 	});
 });
