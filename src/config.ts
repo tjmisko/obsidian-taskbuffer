@@ -64,6 +64,8 @@ export interface TaskbufferSettings {
 	inbox: InboxConfig;
 	showUndated: boolean;
 	strict: boolean;
+	/** Log scan/render phase timings to the console (for diagnosing latency). */
+	debugTiming: boolean;
 	/** `null` = built-in {@link DEFAULT_HORIZONS}. */
 	horizons: HorizonSpec[] | null;
 	horizonsOverlap: OverlapMode;
@@ -88,6 +90,7 @@ export const DEFAULT_SETTINGS: TaskbufferSettings = {
 	inbox: { file: "inbox.md", header: null },
 	showUndated: true,
 	strict: false,
+	debugTiming: true,
 	horizons: null,
 	horizonsOverlap: "sorted",
 	weekStart: "monday",

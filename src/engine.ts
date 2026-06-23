@@ -14,6 +14,7 @@ import { buildSections, collectTags, DisplaySection, RenderOptions } from "./ren
 import { parseFrontmatterDue } from "./frontmatter";
 import { addDays, todayEpoch } from "./dates";
 import { formatEpoch } from "./parse/strftime";
+import { perfStart } from "./perf";
 import * as actions from "./actions";
 import * as mutate from "./mutate";
 
@@ -57,8 +58,10 @@ export class TaskEngine {
 	// ── scan / read ─────────────────────────────────────────────────────────
 
 	async refresh(): Promise<void> {
+		const end = perfStart("engine.refresh (scanVault)");
 		const { tasks, errors } = await scanVault(this.app, this.settings);
 		this.tasks = tasks;
+		end({ tasks: tasks.length });
 		if (this.settings.strict && errors.length > 0) {
 			new Notice(summarizeDateErrors(errors), 8000);
 		}

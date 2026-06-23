@@ -1,6 +1,7 @@
 import { App, PluginSettingTab, Setting } from "obsidian";
 import type TaskbufferPlugin from "./main";
 import { DEFAULT_HORIZONS, HorizonSpec, OverlapMode, WeekStart } from "./config";
+import { setPerfEnabled } from "./perf";
 
 const WEEK_STARTS: WeekStart[] = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 const OVERLAP_MODES: OverlapMode[] = ["sorted", "first_match", "narrowest"];
@@ -109,6 +110,17 @@ export class TaskbufferSettingTab extends PluginSettingTab {
 				t.setValue(s.strict).onChange((v) => {
 					s.strict = v;
 					save();
+				}),
+			);
+
+		new Setting(containerEl)
+			.setName("Log timing to console")
+			.setDesc("Print scan/render phase durations to the developer console for diagnosing latency.")
+			.addToggle((t) =>
+				t.setValue(s.debugTiming).onChange((v) => {
+					s.debugTiming = v;
+					setPerfEnabled(v);
+					persist();
 				}),
 			);
 

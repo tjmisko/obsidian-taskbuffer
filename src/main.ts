@@ -5,9 +5,16 @@ import { CurrentTask } from "./state";
 import { Task } from "./types";
 import { buildParseContext, parseTask } from "./parse/parse";
 import { fileForPath } from "./scan";
-import { TaskbufferView, VIEW_TYPE_TASKBUFFER, TaskbufferHost } from "./view";
+import {
+	TaskbufferView,
+	TaskbufferFullView,
+	VIEW_TYPE_TASKBUFFER,
+	VIEW_TYPE_TASKBUFFER_FULL,
+	TaskbufferHost,
+} from "./view";
 import { TaskbufferSettingTab } from "./settings";
 import { CreateTaskModal, TagFilterModal } from "./modals";
+import { perfStart, setPerfEnabled } from "./perf";
 
 interface PersistedData {
 	settings: Partial<TaskbufferSettings>;
@@ -23,6 +30,7 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 
 	async onload(): Promise<void> {
 		await this.loadState();
+		setPerfEnabled(this.settings.debugTiming);
 
 		const timerStore: TimerStore = {
 			get: () => this.timer,
@@ -35,6 +43,7 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 		this.engine = new TaskEngine(this.app, this.settings, timerStore);
 
 		this.registerView(VIEW_TYPE_TASKBUFFER, (leaf) => new TaskbufferView(leaf, this));
+		this.registerView(VIEW_TYPE_TASKBUFFER_FULL, (leaf) => new TaskbufferFullView(leaf, this));
 		this.addRibbonIcon("list-checks", "Open task buffer", () => void this.activateView());
 		this.statusBar = this.addStatusBarItem();
 		this.updateStatusBar();
@@ -45,7 +54,8 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 		// Keep startup light: scan once and wire file events only after layout is
 		// ready (Obsidian fires `create` for every file during vault init).
 		this.app.workspace.onLayoutReady(() => {
-			void this.refreshAndRender();
+			const end = perfStart("initial refresh (onLayoutReady)");
+			void this.refreshAndRender().then(() => end({ tasks: this.engine.tasks.length }));
 			this.registerEvent(this.app.metadataCache.on("changed", () => this.scheduleRefresh()));
 			this.registerEvent(this.app.vault.on("modify", () => this.scheduleRefresh()));
 			this.registerEvent(this.app.vault.on("create", () => this.scheduleRefresh()));
@@ -117,6 +127,7 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 	// ── view plumbing ─────────────────────────────────────────────────────────
 
 	private async activateView(): Promise<void> {
+		const end = perfStart("activateView (sidebar)");
 		const { workspace } = this.app;
 		let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(VIEW_TYPE_TASKBUFFER)[0] ?? null;
 		if (!leaf) {
@@ -124,11 +135,29 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 			await leaf.setViewState({ type: VIEW_TYPE_TASKBUFFER, active: true });
 		}
 		await workspace.revealLeaf(leaf);
+		end();
+	}
+
+	private async activateFullView(): Promise<void> {
+		const end = perfStart("activateView (full)");
+		const { workspace } = this.app;
+		let leaf: WorkspaceLeaf | null = workspace.getLeavesOfType(VIEW_TYPE_TASKBUFFER_FULL)[0] ?? null;
+		if (!leaf) {
+			leaf = workspace.getLeaf("tab");
+			await leaf.setViewState({ type: VIEW_TYPE_TASKBUFFER_FULL, active: true });
+		}
+		await workspace.revealLeaf(leaf);
+		end();
+	}
+
+	private get allLeaves(): WorkspaceLeaf[] {
+		const ws = this.app.workspace;
+		return [...ws.getLeavesOfType(VIEW_TYPE_TASKBUFFER), ...ws.getLeavesOfType(VIEW_TYPE_TASKBUFFER_FULL)];
 	}
 
 	private renderViews(): void {
-		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_TASKBUFFER)) {
-			if (leaf.view instanceof TaskbufferView) leaf.view.render();
+		for (const leaf of this.allLeaves) {
+			if (leaf.view instanceof TaskbufferView || leaf.view instanceof TaskbufferFullView) leaf.view.render();
 		}
 	}
 
@@ -143,8 +172,8 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 	}
 
 	private clearFiltersInViews(): void {
-		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_TASKBUFFER)) {
-			if (leaf.view instanceof TaskbufferView) leaf.view.clearFilter();
+		for (const leaf of this.allLeaves) {
+			if (leaf.view instanceof TaskbufferView || leaf.view instanceof TaskbufferFullView) leaf.view.clearFilter();
 		}
 	}
 
@@ -160,7 +189,8 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 	}
 
 	private addCommands(): void {
-		this.addCommand({ id: "open", name: "Open", callback: () => void this.activateView() });
+		this.addCommand({ id: "open", name: "Open in sidebar", callback: () => void this.activateView() });
+		this.addCommand({ id: "open-full", name: "Open full page", callback: () => void this.activateFullView() });
 		this.addCommand({ id: "refresh", name: "Refresh tasks", callback: () => void this.refreshAndRender() });
 		this.addCommand({ id: "new-task", name: "New task", callback: () => this.openCreateModal() });
 		this.addCommand({ id: "clear-filters", name: "Clear filters", callback: () => this.clearFiltersInViews() });
