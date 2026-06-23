@@ -1,8 +1,9 @@
 import { Editor, MarkdownFileInfo, MarkdownView, Notice, Plugin, WorkspaceLeaf, debounce } from "obsidian";
-import { TaskbufferSettings, mergeSettings } from "./config";
+import { TaskbufferSettings, mergeSettings, settingsHash } from "./config";
 import { TaskEngine, TimerStore } from "./engine";
 import { CurrentTask } from "./state";
 import { Task } from "./types";
+import { PersistedSnapshot } from "./snapshot";
 import { buildParseContext, parseTask } from "./parse/parse";
 import { fileForPath } from "./scan";
 import {
@@ -19,6 +20,7 @@ import { perfStart, setPerfEnabled } from "./perf";
 interface PersistedData {
 	settings: Partial<TaskbufferSettings>;
 	timer: CurrentTask | null;
+	snapshot?: PersistedSnapshot;
 }
 
 export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
@@ -26,7 +28,11 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 	engine!: TaskEngine;
 	private timer: CurrentTask | null = null;
 	private statusBar!: HTMLElement;
+	/** Latest persisted snapshot blob; kept in memory so saveState never clobbers it. */
+	private persistedSnapshot: PersistedSnapshot | null = null;
 	private scheduleRefresh = debounce(() => void this.refreshAndRender(), 400, true);
+	/** Debounced snapshot write — coalesces bursts of mutations into one disk write. */
+	private writeSnapshot = debounce(() => void this.persistSnapshot(), 1000, false);
 
 	async onload(): Promise<void> {
 		await this.loadState();
@@ -41,6 +47,7 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 			},
 		};
 		this.engine = new TaskEngine(this.app, this.settings, timerStore);
+		this.hydrateFromSnapshot();
 
 		this.registerView(VIEW_TYPE_TASKBUFFER, (leaf) => new TaskbufferView(leaf, this));
 		this.registerView(VIEW_TYPE_TASKBUFFER_FULL, (leaf) => new TaskbufferFullView(leaf, this));
@@ -51,10 +58,11 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 		this.addCommands();
 		this.addSettingTab(new TaskbufferSettingTab(this.app, this));
 
-		// Keep startup light: scan once and wire file events only after layout is
+		// Keep startup light: the snapshot is already painted (hydrateFromSnapshot);
+		// reconcile against the vault and wire file events only after layout is
 		// ready (Obsidian fires `create` for every file during vault init).
 		this.app.workspace.onLayoutReady(() => {
-			const end = perfStart("initial refresh (onLayoutReady)");
+			const end = perfStart("initial reconcile (onLayoutReady)");
 			void this.refreshAndRender().then(() => end({ tasks: this.engine.tasks.length }));
 			this.registerEvent(this.app.metadataCache.on("changed", () => this.scheduleRefresh()));
 			this.registerEvent(this.app.vault.on("modify", () => this.scheduleRefresh()));
@@ -92,7 +100,7 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 	}
 
 	openCreateModal(): void {
-		new CreateTaskModal(this.app, (body) => void this.engine.create(body).then(() => this.renderViews())).open();
+		new CreateTaskModal(this.app, (body) => void this.engine.create(body).then(() => this.afterMutation())).open();
 	}
 
 	openTagFilter(current: string[], onApply: (tags: string[]) => void): void {
@@ -105,11 +113,35 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 		const data = (await this.loadData()) as PersistedData | null;
 		this.settings = mergeSettings(data?.settings ?? {});
 		this.timer = data?.timer ?? null;
+		this.persistedSnapshot = data?.snapshot ?? null;
 	}
 
 	private async saveState(): Promise<void> {
 		const data: PersistedData = { settings: this.settings, timer: this.timer };
+		// Always re-include the snapshot so a settings/timer write never clobbers it.
+		if (this.persistedSnapshot) data.snapshot = this.persistedSnapshot;
 		await this.saveData(data);
+	}
+
+	/** Paint the persisted snapshot immediately (Pillar A), unless it is stale. */
+	private hydrateFromSnapshot(): void {
+		const snap = this.persistedSnapshot;
+		if (!snap || snap.version !== 1) return;
+		if (snap.settingsHash !== settingsHash(this.settings)) return; // parsing rules changed → ignore
+		const end = perfStart("hydrate snapshot");
+		this.engine.hydrate(snap.tasks);
+		this.renderViews();
+		end({ tasks: snap.tasks.length });
+	}
+
+	/** Recompute and persist the snapshot from the engine's current task set. */
+	private async persistSnapshot(): Promise<void> {
+		this.persistedSnapshot = {
+			version: 1,
+			settingsHash: settingsHash(this.settings),
+			tasks: this.engine.snapshot(),
+		};
+		await this.saveState();
 	}
 
 	/** Persist settings only (no re-scan) — used while typing in the settings tab. */
@@ -161,10 +193,16 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 		}
 	}
 
-	async refreshAndRender(): Promise<void> {
-		await this.engine.refresh();
+	/** Re-render after a task-set mutation and (debounced) persist the snapshot. */
+	private afterMutation(): void {
 		this.renderViews();
 		this.updateStatusBar();
+		this.writeSnapshot();
+	}
+
+	async refreshAndRender(): Promise<void> {
+		await this.engine.refresh();
+		this.afterMutation();
 	}
 
 	private updateStatusBar(): void {
@@ -197,12 +235,12 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 		this.addCommand({
 			id: "stop-timer",
 			name: "Stop running timer",
-			callback: () => void this.engine.stopTimer().then(() => this.renderViews()),
+			callback: () => void this.engine.stopTimer().then(() => this.afterMutation()),
 		});
 		this.addCommand({
 			id: "complete-timer",
 			name: "Complete running timer",
-			callback: () => void this.engine.completeTimer().then(() => this.renderViews()),
+			callback: () => void this.engine.completeTimer().then(() => this.afterMutation()),
 		});
 
 		// Editor commands operate on the task under the cursor.
@@ -213,7 +251,7 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 				editorCheckCallback: (checking: boolean, editor: Editor, info: MarkdownFileInfo) => {
 					const task = this.taskAtCursor(editor, info);
 					if (!task) return false;
-					if (!checking) void run(task).then(() => this.renderViews());
+					if (!checking) void run(task).then(() => this.afterMutation());
 					return true;
 				},
 			});

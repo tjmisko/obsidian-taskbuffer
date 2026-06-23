@@ -14,6 +14,7 @@ import { buildSections, collectTags, DisplaySection, RenderOptions } from "./ren
 import { parseFrontmatterDue } from "./frontmatter";
 import { addDays, todayEpoch } from "./dates";
 import { formatEpoch } from "./parse/strftime";
+import { trimSnapshot } from "./snapshot";
 import { perfStart } from "./perf";
 import * as actions from "./actions";
 import * as mutate from "./mutate";
@@ -41,6 +42,10 @@ export class TaskEngine {
 	private byFile = new Map<string, FileEntry>();
 	/** Derived flat list (regular tasks, then synthetic project tasks). */
 	tasks: Task[] = [];
+	/** True between `hydrate` and the first `reconcile`: `tasks` holds only a
+	 * persisted snapshot and `byFile` is empty, so a mutation must reconcile first
+	 * or `rebuildFlat` would wipe the list. */
+	private hydratedOnly = false;
 
 	private undoStack: LineEdit[][] = [];
 	private redoStack: LineEdit[][] = [];
@@ -61,15 +66,41 @@ export class TaskEngine {
 
 	// ── scan / read ─────────────────────────────────────────────────────────
 
-	async refresh(): Promise<void> {
-		const end = perfStart("engine.refresh (scanVault)");
+	/**
+	 * Pillar A: adopt a persisted snapshot as the flat list so the view can paint
+	 * before any scan. `byFile` stays empty until {@link reconcile}; any mutation
+	 * in this window reconciles first (see {@link updateFile}).
+	 */
+	hydrate(snapshotTasks: Task[]): void {
+		this.tasks = snapshotTasks;
+		this.hydratedOnly = true;
+	}
+
+	/** The capped open-task slice to persist (all dated + first N undated). */
+	snapshot(): Task[] {
+		return trimSnapshot(this.tasks);
+	}
+
+	/**
+	 * Pillar B: rebuild the per-file cache from a full candidate scan. This is the
+	 * authoritative read; it clears the hydrated-only flag. Used at startup (after
+	 * the snapshot paint) and by the manual refresh / settings-change paths.
+	 */
+	async reconcile(): Promise<void> {
+		const end = perfStart("engine.reconcile (scanVault)");
 		const { entries, errors } = await scanVault(this.app, this.settings);
 		this.byFile = new Map(entries.map((entry) => [entry.path, entry]));
+		this.hydratedOnly = false;
 		this.rebuildFlat();
 		end({ tasks: this.tasks.length, files: this.byFile.size });
 		if (this.settings.strict && errors.length > 0) {
 			new Notice(summarizeDateErrors(errors), 8000);
 		}
+	}
+
+	/** Full reconcile (manual "Refresh tasks" command / settings change). */
+	async refresh(): Promise<void> {
+		await this.reconcile();
 	}
 
 	/**
@@ -78,6 +109,9 @@ export class TaskEngine {
 	 * single file they touched instead of rescanning the whole vault.
 	 */
 	async updateFile(path: string): Promise<void> {
+		// If we are still showing only the hydrated snapshot, reconcile first so a
+		// single-file splice doesn't collapse the list to just this file.
+		if (this.hydratedOnly) await this.reconcile();
 		const end = perfStart("engine.updateFile");
 		const file = fileForPath(this.app, path);
 		if (!file) {
