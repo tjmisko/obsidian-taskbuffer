@@ -1,11 +1,21 @@
-import { Editor, MarkdownFileInfo, MarkdownView, Notice, Plugin, WorkspaceLeaf, debounce } from "obsidian";
+import {
+	Editor,
+	MarkdownFileInfo,
+	MarkdownView,
+	Notice,
+	Plugin,
+	TAbstractFile,
+	TFile,
+	WorkspaceLeaf,
+	debounce,
+} from "obsidian";
 import { TaskbufferSettings, mergeSettings, settingsHash } from "./config";
 import { TaskEngine, TimerStore } from "./engine";
 import { CurrentTask } from "./state";
 import { Task } from "./types";
 import { PersistedSnapshot } from "./snapshot";
 import { buildParseContext, parseTask } from "./parse/parse";
-import { fileForPath } from "./scan";
+import { fileForPath, fileInSources } from "./scan";
 import {
 	TaskbufferView,
 	TaskbufferFullView,
@@ -30,9 +40,12 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 	private statusBar!: HTMLElement;
 	/** Latest persisted snapshot blob; kept in memory so saveState never clobbers it. */
 	private persistedSnapshot: PersistedSnapshot | null = null;
-	private scheduleRefresh = debounce(() => void this.refreshAndRender(), 400, true);
 	/** Debounced snapshot write — coalesces bursts of mutations into one disk write. */
 	private writeSnapshot = debounce(() => void this.persistSnapshot(), 1000, false);
+	/** Pillar C: file paths to re-read / drop, batched and flushed together. */
+	private dirtyPaths = new Set<string>();
+	private removedPaths = new Set<string>();
+	private flushFileChanges = debounce(() => void this.applyFileChanges(), 150, false);
 
 	async onload(): Promise<void> {
 		await this.loadState();
@@ -64,11 +77,20 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 		this.app.workspace.onLayoutReady(() => {
 			const end = perfStart("initial reconcile (onLayoutReady)");
 			void this.refreshAndRender().then(() => end({ tasks: this.engine.tasks.length }));
-			this.registerEvent(this.app.metadataCache.on("changed", () => this.scheduleRefresh()));
-			this.registerEvent(this.app.vault.on("modify", () => this.scheduleRefresh()));
-			this.registerEvent(this.app.vault.on("create", () => this.scheduleRefresh()));
-			this.registerEvent(this.app.vault.on("delete", () => this.scheduleRefresh()));
-			this.registerEvent(this.app.vault.on("rename", () => this.scheduleRefresh()));
+
+			// Pillar C: per-file incremental updates replace the full-vault rescan.
+			// `changed` (re-index after a content/frontmatter edit) covers modifies;
+			// rename isn't reported to metadataCache, so the vault rename event
+			// re-keys the entry. A file leaving `sources` is dropped, not re-read.
+			this.registerEvent(this.app.metadataCache.on("changed", (file) => this.queueFileUpdate(file)));
+			this.registerEvent(this.app.vault.on("create", (file) => this.queueFileUpdate(file)));
+			this.registerEvent(this.app.vault.on("delete", (file) => this.queueFileRemove(file.path)));
+			this.registerEvent(
+				this.app.vault.on("rename", (file, oldPath) => {
+					this.queueFileRemove(oldPath);
+					this.queueFileUpdate(file);
+				}),
+			);
 		});
 	}
 
@@ -202,6 +224,42 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 
 	async refreshAndRender(): Promise<void> {
 		await this.engine.refresh();
+		this.afterMutation();
+	}
+
+	// ── incremental file updates (Pillar C) ─────────────────────────────────────
+
+	/** Queue a re-read of one file (create / content or frontmatter change). */
+	private queueFileUpdate(file: TAbstractFile): void {
+		if (!(file instanceof TFile) || file.extension !== "md") return;
+		if (!fileInSources(file.path, this.settings.sources)) {
+			// Outside the configured sources — make sure it isn't lingering, don't read it.
+			this.queueFileRemove(file.path);
+			return;
+		}
+		this.removedPaths.delete(file.path);
+		this.dirtyPaths.add(file.path);
+		this.flushFileChanges();
+	}
+
+	/** Queue dropping one file's tasks (delete / rename-away / left sources). */
+	private queueFileRemove(path: string): void {
+		this.dirtyPaths.delete(path);
+		this.removedPaths.add(path);
+		this.flushFileChanges();
+	}
+
+	/** Apply the batched file changes as per-file engine updates, then render once. */
+	private async applyFileChanges(): Promise<void> {
+		const removed = [...this.removedPaths];
+		const dirty = [...this.dirtyPaths];
+		this.removedPaths.clear();
+		this.dirtyPaths.clear();
+		if (removed.length === 0 && dirty.length === 0) return;
+		const end = perfStart("applyFileChanges");
+		for (const path of removed) this.engine.removeFile(path);
+		for (const path of dirty) await this.engine.updateFile(path);
+		end({ updated: dirty.length, removed: removed.length, tasks: this.engine.tasks.length });
 		this.afterMutation();
 	}
 
