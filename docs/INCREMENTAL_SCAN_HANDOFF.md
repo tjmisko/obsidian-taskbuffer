@@ -214,8 +214,8 @@ full `scanVault`; deletes/renames reflect correctly; verbs are instant.
   Completed / In Progress / Decisions / Blockers / Next).
 
 ## Phase checklist
-- [ ] Phase 0 — branch + baseline commits, green
-- [ ] Phase 1 — per-file cache, no behavior change
-- [ ] Phase 2 — metadata-filtered candidates (~615 reads)
-- [ ] Phase 3 — persisted snapshot, cold paint <100ms
-- [ ] Phase 4 — incremental event wiring
+- [x] Phase 0 — branch + baseline commits, green
+- [x] Phase 1 — per-file cache, no behavior change
+- [x] Phase 2 — metadata-filtered candidates (~615 reads)
+- [x] Phase 3 — persisted snapshot, cold paint <100ms
+- [x] Phase 4 — incremental event wiring
