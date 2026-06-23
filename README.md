@@ -1,90 +1,85 @@
-# Obsidian Sample Plugin
+# Task Buffer
 
-This is a sample plugin for Obsidian (https://obsidian.md).
+Aggregate the inline tasks scattered across your notes into a single, time-bucketed
+view — **Overdue, Today, Tomorrow, This Week, This Month, This Year, …** — and
+complete, defer, reschedule, or time-track them without leaving the buffer. Edits
+are written straight back into the original note.
 
-This project uses TypeScript to provide type checking and documentation.
-The repo depends on the latest plugin API (obsidian.d.ts) in TypeScript Definition format, which contains TSDoc comments describing what it does.
+This is an Obsidian port of [taskbuffer.nvim](https://github.com/tjmisko/taskbuffer.nvim),
+keeping the same plain-text task syntax so the same vault works in both.
 
-This sample plugin demonstrates some of the basic functionality the plugin API can do.
-- Adds a ribbon icon, which shows a Notice when clicked.
-- Adds a command "Open modal (simple)" which opens a Modal.
-- Adds a plugin setting tab to the settings page.
-- Registers a global click event and output 'click' to the console.
-- Registers a global interval which logs 'setInterval' to the console.
+## How tasks are written
 
-## First time developing plugins?
+A task is a single checkbox line in any note. Everything except the checkbox and
+body is optional:
 
-Quick starting guide for new plugin devs:
-
-- Check if [someone already developed a plugin for what you want](https://obsidian.md/plugins)! There might be an existing plugin similar enough that you can partner up with.
-- Make a copy of this repo as a template with the "Use this template" button (login to GitHub if you don't see it).
-- Clone your repo to a local development folder. For convenience, you can place this folder in your `.obsidian/plugins/your-plugin-name` folder.
-- Install NodeJS, then run `npm i` in the command line under your repo folder.
-- Run `npm run dev` to compile your plugin from `main.ts` to `main.js`.
-- Make changes to `main.ts` (or create new `.ts` files). Those changes should be automatically compiled into `main.js`.
-- Reload Obsidian to load the new version of your plugin.
-- Enable plugin in settings window.
-- For updates to the Obsidian API run `npm update` in the command line under your repo folder.
-
-## Releasing new releases
-
-- Update your `manifest.json` with your new version number, such as `1.0.1`, and the minimum Obsidian version required for your latest release.
-- Update your `versions.json` file with `"new-plugin-version": "minimum-obsidian-version"` so older versions of Obsidian can download an older version of your plugin that's compatible.
-- Create new GitHub release using your new version number as the "Tag version". Use the exact version number, don't include a prefix `v`. See here for an example: https://github.com/obsidianmd/obsidian-sample-plugin/releases
-- Upload the files `manifest.json`, `main.js`, `styles.css` as binary attachments. Note: The manifest.json file must be in two places, first the root path of your repository and also in the release.
-- Publish the release.
-
-> You can simplify the version bump process by running `npm version patch`, `npm version minor` or `npm version major` after updating `minAppVersion` manually in `manifest.json`.
-> The command will bump version in `manifest.json` and `package.json`, and add the entry for the new version to `versions.json`
-
-## Adding your plugin to the community plugin list
-
-- Check the [plugin guidelines](https://docs.obsidian.md/Plugins/Releasing/Plugin+guidelines).
-- Publish an initial version.
-- Make sure you have a `README.md` file in the root of your repo.
-- Make a pull request at https://github.com/obsidianmd/obsidian-releases to add your plugin.
-
-## How to use
-
-- Clone this repo.
-- Make sure your NodeJS is at least v16 (`node --version`).
-- `npm i` or `yarn` to install dependencies.
-- `npm run dev` to start compilation in watch mode.
-
-## Manually installing the plugin
-
-- Copy over `main.js`, `styles.css`, `manifest.json` to your vault `VaultFolder/.obsidian/plugins/your-plugin-id/`.
-
-## Improve code quality with eslint
-- [ESLint](https://eslint.org/) is a tool that analyzes your code to quickly find problems. You can run ESLint against your plugin to find common bugs and ways to improve your code. 
-- This project already has eslint preconfigured, you can invoke a check by running`npm run lint`
-- Together with a custom eslint [plugin](https://github.com/obsidianmd/eslint-plugin) for Obsidan specific code guidelines.
-- A GitHub action is preconfigured to automatically lint every commit on all branches.
-
-## Funding URL
-
-You can include funding URLs where people who use your plugin can financially support it.
-
-The simple way is to set the `fundingUrl` field to your link in your `manifest.json` file:
-
-```json
-{
-    "fundingUrl": "https://buymeacoffee.com"
-}
+```markdown
+- [ ] Buy groceries <30m> #errand (@[[2026-06-25]] 16:00)
 ```
 
-If you have multiple URLs, you can also do:
+| Part | Example | Notes |
+| --- | --- | --- |
+| Checkbox / status | `- [ ]` open · `- [x]` done · `- [-]` irrelevant | Only open tasks show in the buffer. Configurable. |
+| Body | `Buy groceries` | Free text. |
+| Duration | `<30m>` | Optional estimate. |
+| Tags | `#errand` | Prefix configurable. |
+| Due date | `(@[[2026-06-25]])` | Wrapper and date format configurable. A wikilink alias `[[id\|2026-06-25]]` or path `[[daily/2026-06-25]]` is stripped. |
+| Due time | `16:00` | Inside the wrapper; kept verbatim. |
+| State markers | `::start [[…]] 14:03` `::complete [[…]] 15:30` | Added automatically by the verbs below. |
 
-```json
-{
-    "fundingUrl": {
-        "Buy Me a Coffee": "https://buymeacoffee.com",
-        "GitHub Sponsor": "https://github.com/sponsors",
-        "Patreon": "https://www.patreon.com/"
-    }
-}
+A note's frontmatter can also drive tasks: undated tasks inherit the file's `due`,
+file `tags` are merged in, files with a done `status` and a `due` hide their
+loose tasks, and a file tagged `project` with a `due` becomes a single rolled-up
+task. All of this is configurable in settings.
+
+## Using it
+
+Open the view with the ribbon icon or the **Task buffer: Open** command. In the
+view:
+
+- **Click the checkbox** to complete a task (records a completion time).
+- **Double-click a row** (or press `Enter`) to jump to the source line.
+- **Toolbar** buttons: new task, tag filter, toggle undated, toggle markers, reset, refresh.
+- **Keyboard** (when the view is focused): `j`/`k` move · `Enter` open · `c`
+  complete · `x` check off · `d` defer · `i` irrelevant · `u` undo irrelevant ·
+  `b` start timer · `S` stop timer · `t` set due to today · `Shift`+`←`/`→` shift
+  due ±1 day · `m` toggle markers · `#` filter tags · `z`/`Z` undo/redo a date
+  change · `r` refresh.
+
+Every action is also a command (searchable in the command palette and bindable to
+your own hotkeys — no default hotkeys are set). Commands prefixed with "at cursor"
+act on the task line under your cursor in any note.
+
+## Settings
+
+Sources to scan, the inbox file for new tasks, the horizon definitions and
+overlap mode, week start, strict date validation, the full task format (date/time
+strftime patterns, tag prefix, checkbox glyphs, date wrapper, marker prefix), and
+the frontmatter keys (`due`, `status`, done values, due inheritance, required
+tags).
+
+## Privacy
+
+Task Buffer runs entirely offline. It only reads and writes Markdown files inside
+your vault, stores its settings and the running-timer state in the plugin's own
+data, and makes **no network requests** and collects **no telemetry**.
+
+Works on desktop and mobile.
+
+## Development
+
+```bash
+npm install
+npm run dev     # watch build
+npm run build   # type-check + production bundle
+npm test        # unit tests (vitest)
+npm run lint
 ```
 
-## API Documentation
+The parsing, frontmatter, horizon, and rendering logic is pure TypeScript with no
+Obsidian dependency, so it is unit-tested directly under Node. See `docs/PARITY.md`
+for the design and the parity contract with taskbuffer.nvim.
 
-See https://docs.obsidian.md
+## License
+
+MIT — see [LICENSE](LICENSE).

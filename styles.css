@@ -1,8 +1,142 @@
-/*
+/* Task Buffer view. Columns are aligned via consistent per-cell min-widths and a
+   monospace face; all colors come from theme variables so themes/snippets win. */
 
-This CSS file will be included with your plugin, and
-available in the app when your plugin is enabled.
+.taskbuffer-view {
+	padding: var(--size-4-2) var(--size-4-3);
+	overflow-y: auto;
+	outline: none;
+}
 
-If your plugin does not need CSS, delete this file.
+.taskbuffer-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+	margin-bottom: var(--size-4-2);
+	position: sticky;
+	top: 0;
+	background-color: var(--background-primary);
+	padding-bottom: var(--size-4-1);
+	z-index: 1;
+}
 
-*/
+.taskbuffer-toolbar-button {
+	display: inline-flex;
+	align-items: center;
+	gap: var(--size-4-1);
+	font-size: var(--font-ui-smaller);
+	padding: var(--size-4-1) var(--size-4-2);
+	color: var(--text-muted);
+	background-color: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	cursor: pointer;
+}
+
+.taskbuffer-toolbar-button:hover {
+	color: var(--text-normal);
+	background-color: var(--background-modifier-hover);
+}
+
+.taskbuffer-toolbar-button.is-active {
+	color: var(--text-on-accent);
+	background-color: var(--interactive-accent);
+	border-color: var(--interactive-accent);
+}
+
+.taskbuffer-empty {
+	color: var(--text-muted);
+	font-style: italic;
+	padding: var(--size-4-4) 0;
+	text-align: center;
+}
+
+.taskbuffer-section {
+	color: var(--text-accent);
+	font-style: italic;
+	font-weight: var(--font-semibold);
+	margin: var(--size-4-3) 0 var(--size-4-1);
+}
+
+.taskbuffer-row {
+	display: grid;
+	grid-template-columns: auto auto auto auto 1fr;
+	align-items: baseline;
+	column-gap: var(--size-4-2);
+	padding: var(--size-4-1) var(--size-4-2);
+	border-radius: var(--radius-s);
+	cursor: default;
+}
+
+.taskbuffer-row:hover {
+	background-color: var(--background-modifier-hover);
+}
+
+.taskbuffer-row.is-selected {
+	background-color: var(--background-modifier-active-hover, var(--background-modifier-hover));
+	box-shadow: inset 2px 0 0 var(--interactive-accent);
+}
+
+.taskbuffer-checkbox {
+	margin: 0;
+}
+
+.taskbuffer-date,
+.taskbuffer-time,
+.taskbuffer-duration {
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	white-space: nowrap;
+}
+
+.taskbuffer-date {
+	min-width: 6.5em;
+}
+
+.taskbuffer-time {
+	min-width: 4.5em;
+}
+
+.taskbuffer-duration {
+	min-width: 3.5em;
+	text-align: right;
+}
+
+.taskbuffer-main {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: baseline;
+	gap: var(--size-4-2);
+	min-width: 0;
+}
+
+.taskbuffer-body {
+	color: var(--text-normal);
+}
+
+.taskbuffer-tags {
+	display: inline-flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+}
+
+.taskbuffer-tag {
+	color: var(--tag-color, var(--text-accent));
+	background-color: var(--tag-background, transparent);
+	font-size: var(--font-ui-smaller);
+	padding: 0 var(--size-4-1);
+	border-radius: var(--radius-s);
+}
+
+.taskbuffer-markers {
+	display: inline-flex;
+	flex-wrap: wrap;
+	gap: var(--size-4-1);
+	color: var(--text-faint);
+	font-family: var(--font-monospace);
+	font-size: var(--font-ui-smaller);
+}
+
+.taskbuffer-create-input {
+	width: 100%;
+}
