@@ -12,6 +12,7 @@ import { App, TFile, normalizePath } from "obsidian";
 import { TaskbufferSettings } from "./config";
 import { buildParseContext, parseTask, ParseContext, RawMatch } from "./parse/parse";
 import { enrichFileTasks, projectTaskFor, FileMeta } from "./frontmatter";
+import { FileCandidateInfo, openCharsFromSettings, selectCandidates } from "./candidates";
 import { Task, DateError } from "./types";
 
 /** Is `path` inside one of the configured source folders? Empty list = whole vault. */
@@ -67,12 +68,40 @@ export async function readFileEntry(
 	return { path: file.path, mtime: file.stat.mtime, enriched };
 }
 
-/** Scan every in-source markdown file and return the entries that hold tasks. */
+let warnedOpenGlyph = false;
+
+/**
+ * The in-source files that MIGHT hold an open or project task, decided from the
+ * in-memory metadataCache alone (no disk I/O). This is the Pillar-B filter that
+ * turns a whole-vault read (~6k files) into ~the files that actually have open
+ * tasks (~hundreds). The full read + enrichment happens only on these.
+ */
+export function candidateFiles(app: App, settings: TaskbufferSettings): TFile[] {
+	const files = app.vault.getMarkdownFiles().filter((f) => fileInSources(f.path, settings.sources));
+	const openChars = openCharsFromSettings(settings);
+	if (openChars === null && !warnedOpenGlyph) {
+		warnedOpenGlyph = true;
+		console.warn(
+			"[taskbuffer] formats.checkbox.open has no parseable [x] slot; treating any task list item as a candidate.",
+		);
+	}
+	const infos: FileCandidateInfo[] = files.map((file) => {
+		const cache = app.metadataCache.getFileCache(file);
+		const taskChars = (cache?.listItems ?? [])
+			.map((li) => li.task)
+			.filter((t): t is string => typeof t === "string");
+		return { path: file.path, taskChars, frontmatter: cache?.frontmatter ?? null, cached: cache !== null };
+	});
+	const selected = new Set(selectCandidates(infos, openChars, settings));
+	return files.filter((file) => selected.has(file.path));
+}
+
+/** Scan the candidate files (Pillar B) and return the entries that hold tasks. */
 export async function scanVault(app: App, settings: TaskbufferSettings): Promise<ScanResult> {
 	const ctx = buildParseContext(settings, settings.strict);
-	const files = app.vault.getMarkdownFiles().filter((f) => fileInSources(f.path, settings.sources));
+	const files = candidateFiles(app, settings);
 
-	// Read all files (cachedRead is in-memory after first read) in parallel.
+	// Read candidates (cachedRead is in-memory after first read) in parallel.
 	const all = await Promise.all(files.map((file) => readFileEntry(app, file, ctx, settings)));
 	const entries = all.filter((entry) => entry.enriched.length > 0);
 	return { entries, errors: ctx.dateErrors ?? [] };
