@@ -140,6 +140,37 @@
 	font-size: var(--font-ui-medium);
 }
 
+/* ── inline markdown inside a task body (wikilinks, code, emphasis, links) ──── */
+
+/* Links stay on the body's text baseline and never grow the fixed-height row.
+   Theme variables drive the color so internal/external links match the editor. */
+.taskbuffer-body .taskbuffer-md-link,
+.taskbuffer-detail-body .taskbuffer-md-link {
+	cursor: pointer;
+	text-decoration: none;
+}
+
+.taskbuffer-body .taskbuffer-md-link:hover,
+.taskbuffer-detail-body .taskbuffer-md-link:hover {
+	text-decoration: underline;
+}
+
+.taskbuffer-body .external-link,
+.taskbuffer-detail-body .external-link {
+	color: var(--link-external-color, var(--text-accent));
+}
+
+/* Inline code: snug and slightly smaller so it doesn't push past the clamp. */
+.taskbuffer-body .taskbuffer-md-code,
+.taskbuffer-detail-body .taskbuffer-md-code {
+	font-family: var(--font-monospace);
+	font-size: 0.88em;
+	padding: 0 var(--size-2-1);
+	border-radius: var(--radius-s);
+	background-color: var(--code-background, var(--background-modifier-border));
+	color: var(--code-normal, var(--text-normal));
+}
+
 /* tags + meta sit at the right of the row, never wrapping */
 .taskbuffer-tags {
 	flex: 0 1 auto;

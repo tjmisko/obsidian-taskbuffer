@@ -14,6 +14,7 @@ import { Task } from "./types";
 import { todayEpoch } from "./dates";
 import { DisplayRow, RenderOptions } from "./render/rows";
 import { describeMarkers } from "./render/markers";
+import { tokenizeInline } from "./render/inline";
 import { perfStart } from "./perf";
 
 export const VIEW_TYPE_TASKBUFFER = "taskbuffer-view";
@@ -279,7 +280,8 @@ abstract class TaskbufferViewBase extends ItemView {
 			void this.runOn(index, (task) => this.host.engine.complete(task));
 		});
 
-		el.createSpan({ cls: "taskbuffer-body", text: row.body });
+		const bodyEl = el.createSpan({ cls: "taskbuffer-body" });
+		this.renderBody(bodyEl, row.body, row.task.filePath);
 
 		if (row.tags.length > 0) {
 			const tagsEl = el.createSpan({ cls: "taskbuffer-tags" });
@@ -297,6 +299,53 @@ abstract class TaskbufferViewBase extends ItemView {
 		el.addEventListener("dblclick", () => void this.runOn(index, (task) => this.host.openTaskSource(task)));
 	}
 
+	/**
+	 * Paint a task body into `parent`, rendering its inline markdown to themed
+	 * DOM (wikilinks, code spans, emphasis, links) instead of showing raw source.
+	 * Links are clickable — wikilinks navigate via `sourcePath`, plain links open
+	 * externally — and stop propagation so a click on a link doesn't also select
+	 * the row.
+	 */
+	private renderBody(parent: HTMLElement, body: string, sourcePath: string): void {
+		for (const tok of tokenizeInline(body)) {
+			switch (tok.kind) {
+				case "text":
+					parent.appendText(tok.text);
+					break;
+				case "code":
+					parent.createEl("code", { cls: "taskbuffer-md-code", text: tok.text });
+					break;
+				case "bold":
+					parent.createEl("strong", { text: tok.text });
+					break;
+				case "italic":
+					parent.createEl("em", { text: tok.text });
+					break;
+				case "strike":
+					parent.createEl("del", { text: tok.text });
+					break;
+				case "wikilink": {
+					const a = parent.createEl("a", { cls: "internal-link taskbuffer-md-link", text: tok.text, href: tok.target });
+					a.addEventListener("click", (evt) => {
+						evt.preventDefault();
+						evt.stopPropagation();
+						void this.app.workspace.openLinkText(tok.target, sourcePath, evt.ctrlKey || evt.metaKey);
+					});
+					break;
+				}
+				case "link": {
+					const a = parent.createEl("a", { cls: "external-link taskbuffer-md-link", text: tok.text, href: tok.href });
+					a.addEventListener("click", (evt) => {
+						evt.preventDefault();
+						evt.stopPropagation();
+						window.open(tok.href, "_blank");
+					});
+					break;
+				}
+			}
+		}
+	}
+
 	// ── detail strip (selected task) ───────────────────────────────────────────
 
 	private updateDetail(): void {
@@ -309,7 +358,8 @@ abstract class TaskbufferViewBase extends ItemView {
 			return;
 		}
 
-		this.detailEl.createDiv({ cls: "taskbuffer-detail-body", text: row.body });
+		const detailBodyEl = this.detailEl.createDiv({ cls: "taskbuffer-detail-body" });
+		this.renderBody(detailBodyEl, row.body, row.task.filePath);
 
 		const meta = this.detailEl.createDiv({ cls: "taskbuffer-detail-meta" });
 		if (row.dateText) meta.createSpan({ cls: "taskbuffer-date", text: row.dateText });
