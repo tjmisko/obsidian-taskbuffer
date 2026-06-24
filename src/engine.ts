@@ -125,6 +125,10 @@ export class TaskEngine {
 	 * single file they touched instead of rescanning the whole vault.
 	 */
 	async updateFile(path: string): Promise<void> {
+		// A reconcile rebuilds byFile wholesale and now yields mid-scan, so wait for
+		// any in-flight one to finish — otherwise its final `byFile =` could clobber
+		// the splice below.
+		if (this.reconcilePromise) await this.reconcilePromise;
 		// If we are still showing only the hydrated snapshot, reconcile first so a
 		// single-file splice doesn't collapse the list to just this file.
 		if (this.hydratedOnly) await this.reconcile();

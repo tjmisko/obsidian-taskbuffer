@@ -104,14 +104,36 @@ export function candidateFiles(app: App, settings: TaskbufferSettings): TFile[] 
 	return result;
 }
 
+/** Candidate files read per batch before yielding the main thread. */
+const SCAN_BATCH_SIZE = 50;
+
+/**
+ * Yield to the event loop so the browser can paint a frame and handle input
+ * between scan batches. A macrotask (setTimeout) is required: a microtask
+ * (`Promise.resolve()`) would run before the next render and so would NOT
+ * actually return control to rendering.
+ */
+function yieldToEventLoop(): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, 0));
+}
+
 /** Scan the candidate files (Pillar B) and return the entries that hold tasks. */
 export async function scanVault(app: App, settings: TaskbufferSettings): Promise<ScanResult> {
 	const ctx = buildParseContext(settings, settings.strict);
 	const files = candidateFiles(app, settings);
 
-	// Read candidates (cachedRead is in-memory after first read) in parallel.
-	const all = await Promise.all(files.map((file) => readFileEntry(app, file, ctx, settings)));
-	const entries = all.filter((entry) => entry.enriched.length > 0);
+	// Read + parse in batches. Within a batch reads run concurrently (cachedRead
+	// is async I/O); between batches we yield so the cumulative synchronous parse
+	// work doesn't block paint/input for the whole reconcile.
+	const entries: FileEntry[] = [];
+	for (let i = 0; i < files.length; i += SCAN_BATCH_SIZE) {
+		const batch = files.slice(i, i + SCAN_BATCH_SIZE);
+		const read = await Promise.all(batch.map((file) => readFileEntry(app, file, ctx, settings)));
+		for (const entry of read) {
+			if (entry.enriched.length > 0) entries.push(entry);
+		}
+		if (i + SCAN_BATCH_SIZE < files.length) await yieldToEventLoop();
+	}
 	return { entries, errors: ctx.dateErrors ?? [] };
 }
 
