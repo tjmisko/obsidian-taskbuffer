@@ -13,6 +13,7 @@ import { TaskbufferSettings } from "./config";
 import { buildParseContext, parseTask, ParseContext, RawMatch } from "./parse/parse";
 import { enrichFileTasks, projectTaskFor, FileMeta } from "./frontmatter";
 import { FileCandidateInfo, openCharsFromSettings, selectCandidates } from "./candidates";
+import { perfStart } from "./perf";
 import { Task, DateError } from "./types";
 
 /** Is `path` inside one of the configured source folders? Empty list = whole vault. */
@@ -77,6 +78,7 @@ let warnedOpenGlyph = false;
  * tasks (~hundreds). The full read + enrichment happens only on these.
  */
 export function candidateFiles(app: App, settings: TaskbufferSettings): TFile[] {
+	const end = perfStart("  candidates");
 	const files = app.vault.getMarkdownFiles().filter((f) => fileInSources(f.path, settings.sources));
 	const openChars = openCharsFromSettings(settings);
 	if (openChars === null && !warnedOpenGlyph) {
@@ -85,15 +87,21 @@ export function candidateFiles(app: App, settings: TaskbufferSettings): TFile[] 
 			"[taskbuffer] formats.checkbox.open has no parseable [x] slot; treating any task list item as a candidate.",
 		);
 	}
+	let uncached = 0;
 	const infos: FileCandidateInfo[] = files.map((file) => {
 		const cache = app.metadataCache.getFileCache(file);
+		if (cache === null) uncached += 1;
 		const taskChars = (cache?.listItems ?? [])
 			.map((li) => li.task)
 			.filter((t): t is string => typeof t === "string");
 		return { path: file.path, taskChars, frontmatter: cache?.frontmatter ?? null, cached: cache !== null };
 	});
 	const selected = new Set(selectCandidates(infos, openChars, settings));
-	return files.filter((file) => selected.has(file.path));
+	const result = files.filter((file) => selected.has(file.path));
+	// `uncached` near `total` means metadataCache wasn't ready yet, so the filter
+	// degraded toward read-all (safe, but slow) — the key reconcile-cost signal.
+	end({ candidates: result.length, total: files.length, uncached });
+	return result;
 }
 
 /** Scan the candidate files (Pillar B) and return the entries that hold tasks. */
