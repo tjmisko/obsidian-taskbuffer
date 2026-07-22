@@ -129,7 +129,11 @@
 
 .taskbuffer-view.is-narrow .taskbuffer-tags {
 	grid-area: tags;
-	justify-self: start;
+	/* Keep the default justify-self:stretch — start/fit-content can never go
+	   below the nowrap chip row's min-content, so the box would slide under the
+	   date column. Stretch pins the box to its track (overflow:hidden then clips
+	   the chips at the gap); min-width:0 keeps the track from growing to fit. */
+	min-width: 0;
 }
 
 .taskbuffer-view.is-narrow .taskbuffer-meta {
