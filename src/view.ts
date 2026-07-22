@@ -40,6 +40,8 @@ interface VItem {
 }
 
 const OVERSCAN_ROWS = 8;
+/** Below this container width (px), rows stack tags/date under the body (phones, sidebar). */
+const NARROW_BREAKPOINT = 480;
 
 /** Rows shown in the keyboard-help overlay. */
 const HELP_KEYS: Array<[string, string]> = [
@@ -123,7 +125,7 @@ abstract class TaskbufferViewBase extends ItemView {
 		this.render();
 		window.setTimeout(() => {
 			this.contentEl.focus();
-			this.renderWindow(true); // viewport now has a real height
+			this.onResize(); // viewport now has a real size; narrow state may flip
 		}, 0);
 		end();
 	}
@@ -133,7 +135,12 @@ abstract class TaskbufferViewBase extends ItemView {
 	}
 
 	onResize(): void {
-		this.renderWindow(true);
+		// Crossing the narrow breakpoint changes the uniform row height, which
+		// invalidates the whole item layout; otherwise repainting the window is enough.
+		const wasNarrow = this.contentEl.hasClass("is-narrow");
+		this.updateNarrow();
+		if (this.contentEl.hasClass("is-narrow") !== wasNarrow) this.render();
+		else this.renderWindow(true);
 	}
 
 	clearFilter(): void {
@@ -148,6 +155,7 @@ abstract class TaskbufferViewBase extends ItemView {
 	render(): void {
 		const end = perfStart(`render[${this.layoutMode()}]`);
 		this.settings = this.host.getSettings();
+		this.updateNarrow();
 		this.measure();
 
 		const buildEnd = perfStart("  sections");
@@ -194,16 +202,40 @@ abstract class TaskbufferViewBase extends ItemView {
 		end({ rows: this.rows.length });
 	}
 
-	/** Measure uniform row/section heights from real probe elements (handles zoom/theme). */
+	/**
+	 * Measure uniform row/section heights from real probe elements (handles
+	 * zoom/theme/platform). The probe row carries the worst-case content the
+	 * layout allows — a two-line body plus a tag and a date — and every painted
+	 * row gets this measured height inline, so the virtualizer's pitch and the
+	 * painted height cannot disagree (they did on iOS, where the old CSS calc
+	 * height didn't resolve and rows auto-sized taller than the pitch).
+	 */
 	private measure(): void {
 		const probe = this.viewportEl.createDiv({ cls: "taskbuffer-probe" });
 		const section = probe.createDiv({ cls: "taskbuffer-section", text: "Probe" });
 		const row = probe.createDiv({ cls: "taskbuffer-row" });
 		row.createEl("input", { cls: "task-list-item-checkbox taskbuffer-checkbox", attr: { type: "checkbox" } });
-		row.createSpan({ cls: "taskbuffer-body", text: "Probe" });
+		const body = row.createSpan({ cls: "taskbuffer-body" });
+		body.appendText("Probe");
+		body.createEl("br");
+		body.appendText("Probe");
+		row.createSpan({ cls: "taskbuffer-tags" }).createSpan({ cls: "taskbuffer-tag", text: "#probe" });
+		row.createSpan({ cls: "taskbuffer-meta" }).createSpan({ cls: "taskbuffer-date", text: "2026-01-01" });
 		this.sectionH = section.offsetHeight || 22;
-		this.rowH = row.offsetHeight || 28;
+		this.rowH = row.offsetHeight || 44;
 		probe.remove();
+		console.debug("taskbuffer: measure", {
+			rowH: this.rowH,
+			sectionH: this.sectionH,
+			width: this.viewportEl.clientWidth,
+			narrow: this.contentEl.hasClass("is-narrow"),
+		});
+	}
+
+	/** Stack tags/date under the body when the pane is too narrow for one line. */
+	private updateNarrow(): void {
+		const width = this.viewportEl.clientWidth;
+		if (width > 0) this.contentEl.toggleClass("is-narrow", width < NARROW_BREAKPOINT);
 	}
 
 	// ── windowed paint (scroll / selection) ────────────────────────────────────
@@ -261,6 +293,7 @@ abstract class TaskbufferViewBase extends ItemView {
 	private renderSection(it: VItem): void {
 		const el = this.sizerEl.createDiv({ cls: "taskbuffer-section", text: it.section ?? "" });
 		el.style.top = `${it.top}px`;
+		el.style.height = `${it.height}px`;
 	}
 
 	private renderRow(it: VItem): void {
@@ -268,6 +301,7 @@ abstract class TaskbufferViewBase extends ItemView {
 		const row = this.rows[index] as DisplayRow;
 		const el = this.sizerEl.createDiv({ cls: "taskbuffer-row" });
 		el.style.top = `${it.top}px`;
+		el.style.height = `${it.height}px`;
 		el.dataset.index = String(index);
 		if (index === this.selected) el.addClass("is-selected");
 
