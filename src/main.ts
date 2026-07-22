@@ -3,6 +3,7 @@ import {
 	MarkdownFileInfo,
 	MarkdownView,
 	Notice,
+	Platform,
 	Plugin,
 	TAbstractFile,
 	TFile,
@@ -26,6 +27,7 @@ import {
 import { TaskbufferSettingTab } from "./settings";
 import { CreateTaskModal, TagFilterModal } from "./modals";
 import { perfStart, setPerfEnabled } from "./perf";
+import { ConsoleCapture, LogBuffer, renderDump } from "./debuglog";
 
 interface PersistedData {
 	settings: Partial<TaskbufferSettings>;
@@ -46,8 +48,15 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 	private dirtyPaths = new Set<string>();
 	private removedPaths = new Set<string>();
 	private flushFileChanges = debounce(() => void this.applyFileChanges(), 150, false);
+	/** Ring buffer of console output + uncaught errors, dumped via the debug-log commands. */
+	private logBuffer = new LogBuffer();
+	private consoleCapture: ConsoleCapture | null = null;
 
 	async onload(): Promise<void> {
+		// First thing, so everything logged from here on is capturable on mobile.
+		this.consoleCapture = new ConsoleCapture(this.logBuffer, console, window);
+		this.consoleCapture.install();
+
 		await this.loadState();
 		setPerfEnabled(this.settings.debugTiming);
 
@@ -97,8 +106,10 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 	}
 
 	onunload(): void {
-		// Intentionally empty: do not detach leaves of our view type (Obsidian
-		// reinitializes them on update; detaching would disrupt the user's layout).
+		// Do not detach leaves of our view type (Obsidian reinitializes them on
+		// update; detaching would disrupt the user's layout).
+		this.consoleCapture?.uninstall();
+		this.consoleCapture = null;
 	}
 
 	// ── TaskbufferHost ─────────────────────────────────────────────────────────
@@ -325,5 +336,66 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 		editorVerb("set-due-today-at-cursor", "Set due date to today at cursor", (t) => this.engine.setDateToday(t));
 		editorVerb("shift-due-back-at-cursor", "Shift due date back one day", (t) => this.engine.shiftDate(t, -1));
 		editorVerb("shift-due-forward-at-cursor", "Shift due date forward one day", (t) => this.engine.shiftDate(t, 1));
+
+		// Mobile debugging: iOS Obsidian has no devtools, so logs leave the
+		// device via the clipboard or a note in the vault.
+		this.addCommand({ id: "copy-debug-log", name: "Copy debug log", callback: () => void this.copyDebugLog() });
+		this.addCommand({
+			id: "write-debug-log",
+			name: "Write debug log to note",
+			callback: () => void this.writeDebugLogNote(),
+		});
+		if (Platform.isDesktopApp) {
+			this.addCommand({
+				id: "toggle-mobile-emulation",
+				name: "Toggle mobile emulation",
+				callback: () => this.toggleMobileEmulation(),
+			});
+		}
+	}
+
+	// ── Mobile debugging ───────────────────────────────────────────────────────
+
+	private debugLogDump(): string {
+		const platform = Platform.isIosApp
+			? "ios"
+			: Platform.isAndroidApp
+				? "android"
+				: Platform.isMobile
+					? "mobile (other)"
+					: "desktop";
+		return renderDump(this.logBuffer, {
+			pluginVersion: this.manifest.version,
+			platform,
+			// Recorded verbatim in the debug dump (OS/WebKit version), not used for detection.
+			// eslint-disable-next-line obsidianmd/platform
+			userAgent: navigator.userAgent,
+		});
+	}
+
+	private async copyDebugLog(): Promise<void> {
+		try {
+			await navigator.clipboard.writeText(this.debugLogDump());
+			new Notice(`Copied debug log (${this.logBuffer.length} entries)`);
+		} catch (err) {
+			new Notice("Could not copy debug log — use the write-to-note command instead.");
+			console.error("taskbuffer: clipboard write failed", err);
+		}
+	}
+
+	private async writeDebugLogNote(): Promise<void> {
+		const path = "taskbuffer-debug.md";
+		const content = "```\n" + this.debugLogDump() + "\n```\n";
+		const existing = this.app.vault.getFileByPath(path);
+		if (existing) await this.app.vault.process(existing, () => content);
+		else await this.app.vault.create(path, content);
+		new Notice(`Wrote ${path} (${this.logBuffer.length} entries)`);
+	}
+
+	private toggleMobileEmulation(): void {
+		// emulateMobile is an undocumented desktop-only debug hook; the official
+		// docs recommend exactly this call for testing mobile layouts.
+		const app = this.app as unknown as { isMobile: boolean; emulateMobile(enabled: boolean): void };
+		app.emulateMobile(!app.isMobile);
 	}
 }
