@@ -64,7 +64,9 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 
 		this.registerView(VIEW_TYPE_TASKBUFFER, (leaf) => new TaskbufferView(leaf, this));
 		this.registerView(VIEW_TYPE_TASKBUFFER_FULL, (leaf) => new TaskbufferFullView(leaf, this));
-		this.addRibbonIcon("list-checks", "Open task buffer", () => void this.activateView());
+		// "Taskbuffer" is the plugin's proper name (matches manifest), not free UI copy.
+		// eslint-disable-next-line obsidianmd/ui/sentence-case
+		this.addRibbonIcon("list-checks", "Open Taskbuffer", () => void this.activateView());
 		this.statusBar = this.addStatusBarItem();
 		this.updateStatusBar();
 

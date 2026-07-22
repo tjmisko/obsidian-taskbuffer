@@ -1,6 +1,6 @@
 {
 	"id": "taskbuffer",
-	"name": "Task Buffer",
+	"name": "Taskbuffer",
 	"version": "0.1.0",
 	"minAppVersion": "1.7.2",
 	"description": "Aggregate inline tasks from across your notes into a time-horizon view — overdue, today, this week — then complete, defer, or reschedule them in place.",

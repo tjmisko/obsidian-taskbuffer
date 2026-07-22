@@ -57,7 +57,7 @@ function compareUndated(a: Task, b: Task): number {
 }
 
 /**
- * Build the ordered, non-empty sections for the task buffer. Only `open` tasks
+ * Build the ordered, non-empty sections for the taskbuffer. Only `open` tasks
  * appear (done/irrelevant are filtered out, matching the reference view). The
  * undated section, when enabled, is always last.
  */

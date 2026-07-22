@@ -1,4 +1,4 @@
-/* Task Buffer view. Virtualized, 100%-keyboard. The list is a scrolling viewport
+/* Taskbuffer view. Virtualized, 100%-keyboard. The list is a scrolling viewport
    whose rows are absolutely positioned inside a full-height sizer — only the rows
    near the viewport are ever in the DOM, so render time is constant at any task
    count. Rows are a FIXED two-line-tall height (uniform, required for exact
