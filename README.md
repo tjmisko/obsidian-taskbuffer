@@ -8,6 +8,8 @@ are written straight back into the original note.
 This is an Obsidian port of [taskbuffer.nvim](https://github.com/tjmisko/taskbuffer.nvim),
 keeping the same plain-text task syntax so the same vault works in both.
 
+> **Provenance.** taskbuffer began as a Bash tool and a compiled Go binary + Neovim plugin I hand-wrote; this TypeScript Obsidian port — like the current pure-Lua `taskbuffer.nvim` — was built by AI coding agents under my direction.
+
 ## How tasks are written
 
 A task is a single checkbox line in any note. Everything except the checkbox and
