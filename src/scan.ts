@@ -30,12 +30,16 @@ export function fileInSources(path: string, sources: string[]): boolean {
 export interface FileEntry {
 	path: string; // vault-relative file path
 	mtime: number; // TFile.stat.mtime
+	size: number; // TFile.stat.size; mtime+size together decide scan-cache reuse
 	enriched: Task[]; // per-file enrichment output (regular tasks, then project task)
+	errors: DateError[]; // strict-mode date errors from this file's parse
 }
 
 export interface ScanResult {
 	entries: FileEntry[];
 	errors: DateError[];
+	read: number; // candidate files actually read from disk
+	reused: number; // candidate files reused from the scan cache (no read)
 }
 
 /**
@@ -51,6 +55,10 @@ export async function readFileEntry(
 	settings: TaskbufferSettings,
 ): Promise<FileEntry> {
 	const content = await app.vault.cachedRead(file);
+	// Parse + enrichment are synchronous after the single await above, so even
+	// with concurrent batch reads the shared ctx grows only by THIS file's errors
+	// between here and the slice below.
+	const errStart = ctx.dateErrors?.length ?? 0;
 	const lines = content.split("\n");
 	const raw: Task[] = [];
 	for (let i = 0; i < lines.length; i++) {
@@ -66,7 +74,8 @@ export async function readFileEntry(
 	const enriched = enrichFileTasks(raw, meta, settings);
 	const projectTask = projectTaskFor(meta, settings);
 	if (projectTask) enriched.push(projectTask);
-	return { path: file.path, mtime: file.stat.mtime, enriched };
+	const errors = ctx.dateErrors?.slice(errStart) ?? [];
+	return { path: file.path, mtime: file.stat.mtime, size: file.stat.size, enriched, errors };
 }
 
 let warnedOpenGlyph = false;
@@ -117,24 +126,58 @@ function yieldToEventLoop(): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-/** Scan the candidate files (Pillar B) and return the entries that hold tasks. */
-export async function scanVault(app: App, settings: TaskbufferSettings): Promise<ScanResult> {
+/**
+ * Scan the candidate files (Pillar B) and return the entries that hold tasks.
+ * When `reuse` (Pillar D: the persisted scan cache, or the live per-file cache)
+ * has an entry whose mtime+size still match the vault's in-memory file index,
+ * that entry is adopted WITHOUT reading the file. On mobile every read crosses
+ * the JS↔native bridge (~15ms/file), so skipping unchanged files is what turns
+ * a ~10s cold-start reconcile into a sub-second one.
+ */
+export async function scanVault(
+	app: App,
+	settings: TaskbufferSettings,
+	reuse?: ReadonlyMap<string, FileEntry>,
+): Promise<ScanResult> {
 	const ctx = buildParseContext(settings, settings.strict);
 	const files = candidateFiles(app, settings);
+
+	const byPath = new Map<string, FileEntry>();
+	const reusedErrors: DateError[] = [];
+	const toRead: TFile[] = [];
+	for (const file of files) {
+		const cached = reuse?.get(file.path);
+		if (cached && cached.mtime === file.stat.mtime && cached.size === file.stat.size) {
+			byPath.set(file.path, cached);
+			reusedErrors.push(...cached.errors);
+		} else {
+			toRead.push(file);
+		}
+	}
 
 	// Read + parse in batches. Within a batch reads run concurrently (cachedRead
 	// is async I/O); between batches we yield so the cumulative synchronous parse
 	// work doesn't block paint/input for the whole reconcile.
-	const entries: FileEntry[] = [];
-	for (let i = 0; i < files.length; i += SCAN_BATCH_SIZE) {
-		const batch = files.slice(i, i + SCAN_BATCH_SIZE);
+	for (let i = 0; i < toRead.length; i += SCAN_BATCH_SIZE) {
+		const batch = toRead.slice(i, i + SCAN_BATCH_SIZE);
 		const read = await Promise.all(batch.map((file) => readFileEntry(app, file, ctx, settings)));
-		for (const entry of read) {
-			if (entry.enriched.length > 0) entries.push(entry);
-		}
-		if (i + SCAN_BATCH_SIZE < files.length) await yieldToEventLoop();
+		for (const entry of read) byPath.set(entry.path, entry);
+		if (i + SCAN_BATCH_SIZE < toRead.length) await yieldToEventLoop();
 	}
-	return { entries, errors: ctx.dateErrors ?? [] };
+
+	// Emit in candidate order regardless of how entries were sourced, so the
+	// flat list (and thus snapshots) is byte-stable across cached/uncached runs.
+	const entries: FileEntry[] = [];
+	for (const file of files) {
+		const entry = byPath.get(file.path);
+		if (entry && entry.enriched.length > 0) entries.push(entry);
+	}
+	return {
+		entries,
+		errors: (ctx.dateErrors ?? []).concat(reusedErrors),
+		read: toRead.length,
+		reused: files.length - toRead.length,
+	};
 }
 
 /** Resolve a vault-relative path to a TFile, or null. */

@@ -49,6 +49,10 @@ export class TaskEngine {
 	/** The single in-flight reconcile, if any — so concurrent callers share one
 	 * scan instead of racing two wholesale `byFile` reassignments. */
 	private reconcilePromise: Promise<void> | null = null;
+	/** Pillar D: persisted scan-cache entries for the NEXT reconcile to reuse
+	 * (mtime+size matching). Consumed once; `refresh` discards it so a manual
+	 * refresh / settings change re-reads every candidate. */
+	private startupCache: Map<string, FileEntry> | null = null;
 
 	private undoStack: LineEdit[][] = [];
 	private redoStack: LineEdit[][] = [];
@@ -84,6 +88,17 @@ export class TaskEngine {
 		return trimSnapshot(this.tasks);
 	}
 
+	/** Adopt persisted scan-cache entries (Pillar D) for the next reconcile. */
+	setStartupCache(entries: FileEntry[]): void {
+		this.startupCache = new Map(entries.map((entry) => [entry.path, entry]));
+	}
+
+	/** The per-file cache to persist. Empty while only hydrated (`byFile` is not
+	 * yet authoritative), which callers use as the don't-persist signal. */
+	fileEntries(): FileEntry[] {
+		return [...this.byFile.values()];
+	}
+
 	/**
 	 * Pillar B: rebuild the per-file cache from a full candidate scan. This is the
 	 * authoritative read; it clears the hydrated-only flag. Used at startup (after
@@ -104,18 +119,22 @@ export class TaskEngine {
 
 	private async runReconcile(): Promise<void> {
 		const end = perfStart("engine.reconcile (scanVault)");
-		const { entries, errors } = await scanVault(this.app, this.settings);
+		const reuse = this.startupCache;
+		this.startupCache = null;
+		const { entries, errors, read, reused } = await scanVault(this.app, this.settings, reuse ?? undefined);
 		this.byFile = new Map(entries.map((entry) => [entry.path, entry]));
 		this.hydratedOnly = false;
 		this.rebuildFlat();
-		end({ tasks: this.tasks.length, files: this.byFile.size });
+		end({ tasks: this.tasks.length, files: this.byFile.size, read, reused });
 		if (this.settings.strict && errors.length > 0) {
 			new Notice(summarizeDateErrors(errors), 8000);
 		}
 	}
 
-	/** Full reconcile (manual "Refresh tasks" command / settings change). */
+	/** Full reconcile (manual "Refresh tasks" command / settings change).
+	 * Discards any pending startup cache: this path exists to re-read reality. */
 	async refresh(): Promise<void> {
+		this.startupCache = null;
 		await this.reconcile();
 	}
 

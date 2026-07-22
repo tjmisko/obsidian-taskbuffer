@@ -15,6 +15,7 @@ import { TaskEngine, TimerStore } from "./engine";
 import { CurrentTask } from "./state";
 import { Task } from "./types";
 import { PersistedSnapshot } from "./snapshot";
+import { loadScanCache, saveScanCache, scanCacheDbName } from "./scancache";
 import { buildParseContext, parseTask } from "./parse/parse";
 import { fileForPath, fileInSources } from "./scan";
 import {
@@ -44,6 +45,12 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 	private persistedSnapshot: PersistedSnapshot | null = null;
 	/** Debounced snapshot write — coalesces bursts of mutations into one disk write. */
 	private writeSnapshot = debounce(() => void this.persistSnapshot(), 1000, false);
+	/** Pillar D: per-vault IndexedDB name for the persisted scan cache. */
+	private scanCacheDb!: string;
+	/** In-flight startup load of the scan cache; awaited before the initial reconcile. */
+	private scanCacheLoad: Promise<void> = Promise.resolve();
+	/** Debounced scan-cache write — the blob is O(all tasks), so coalesce hard. */
+	private writeScanCache = debounce(() => void this.persistScanCache(), 2000, false);
 	/** Pillar C: file paths to re-read / drop, batched and flushed together. */
 	private dirtyPaths = new Set<string>();
 	private removedPaths = new Set<string>();
@@ -71,6 +78,14 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 		this.engine = new TaskEngine(this.app, this.settings, timerStore);
 		this.hydrateFromSnapshot();
 
+		// Pillar D: start pulling the persisted scan cache now so it is (usually)
+		// ready by the time onLayoutReady kicks off the initial reconcile.
+		// `appId` is Obsidian's per-vault id; undocumented but stable (Dataview
+		// keys its IndexedDB cache the same way). Vault name is the fallback.
+		const appId = (this.app as unknown as { appId?: string }).appId ?? this.app.vault.getName();
+		this.scanCacheDb = scanCacheDbName(appId);
+		this.scanCacheLoad = this.loadStartupScanCache();
+
 		this.registerView(VIEW_TYPE_TASKBUFFER, (leaf) => new TaskbufferView(leaf, this));
 		this.registerView(VIEW_TYPE_TASKBUFFER_FULL, (leaf) => new TaskbufferFullView(leaf, this));
 		// "Taskbuffer" is the plugin's proper name (matches manifest), not free UI copy.
@@ -87,7 +102,7 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 		// ready (Obsidian fires `create` for every file during vault init).
 		this.app.workspace.onLayoutReady(() => {
 			const end = perfStart("initial reconcile (onLayoutReady)");
-			void this.refreshAndRender().then(() => end({ tasks: this.engine.tasks.length }));
+			void this.startupReconcile().then(() => end({ tasks: this.engine.tasks.length }));
 
 			// Pillar C: per-file incremental updates replace the full-vault rescan.
 			// `changed` (re-index after a content/frontmatter edit) covers modifies;
@@ -179,6 +194,32 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 		await this.saveState();
 	}
 
+	/** Load the persisted scan cache (Pillar D) and hand it to the engine. */
+	private async loadStartupScanCache(): Promise<void> {
+		const end = perfStart("scan cache load");
+		const entries = await loadScanCache(this.scanCacheDb, settingsHash(this.settings));
+		if (entries) this.engine.setStartupCache(entries);
+		end({ files: entries?.length ?? 0, hit: entries !== null });
+	}
+
+	/**
+	 * The initial reconcile: wait for the persisted scan cache so unchanged files
+	 * are reused instead of re-read, then reconcile and render. Uses
+	 * `engine.reconcile` directly — `refresh` would discard the startup cache.
+	 */
+	private async startupReconcile(): Promise<void> {
+		await this.scanCacheLoad;
+		await this.engine.reconcile();
+		this.afterMutation();
+	}
+
+	/** Persist the per-file scan cache from the engine's current state. */
+	private async persistScanCache(): Promise<void> {
+		const entries = this.engine.fileEntries();
+		if (entries.length === 0) return; // hydrated-only: nothing authoritative yet
+		await saveScanCache(this.scanCacheDb, settingsHash(this.settings), entries);
+	}
+
 	/** Persist settings only (no re-scan) — used while typing in the settings tab. */
 	async persistSettings(): Promise<void> {
 		this.engine.settings = this.settings;
@@ -228,11 +269,12 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 		}
 	}
 
-	/** Re-render after a task-set mutation and (debounced) persist the snapshot. */
+	/** Re-render after a task-set mutation and (debounced) persist snapshot + scan cache. */
 	private afterMutation(): void {
 		this.renderViews();
 		this.updateStatusBar();
 		this.writeSnapshot();
+		this.writeScanCache();
 	}
 
 	async refreshAndRender(): Promise<void> {

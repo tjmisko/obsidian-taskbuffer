@@ -78,6 +78,29 @@ Replace the debounced full-vault rescan with a per-file update:
   `refresh()` (full scan) after writing. They switch to `updateFile(path)` for
   the one file they touched → verbs become instant.
 
+### D. Persisted scan cache (mtime-incremental cold-start reconcile)
+
+Added after mobile profiling: on iOS the Pillar-B reconcile still read all ~632
+candidates through the Capacitor JS↔native bridge at ~15 ms/file = **9.6 s**
+(desktop: 130–220 ms warm). The fix is the "full-snapshot + mtime-incremental
+reconcile" variant rejected under Pillar A for data.json — but stored in
+**IndexedDB** (per-vault DB, keyed like Dataview's index cache), which the
+git-churn/size argument doesn't apply to.
+
+- **Scope:** the engine's entire `byFile` map — each entry carries
+  `path, mtime, size, enriched[], errors[]`.
+- **Reconcile:** `scanVault` adopts a cached entry when `mtime` **and** `size`
+  match the vault's in-memory file index; only new/changed candidates are read.
+  Cold start reads drop from ~632 to "files changed since last session".
+- **Invalidation:** same `settingsHash` as the snapshot; version field; any
+  malformed/absent cache (or a >3 s IndexedDB hang, an iOS failure mode) falls
+  back to the full candidate scan. Manual refresh / settings change bypass
+  reuse entirely (`engine.refresh` discards the startup cache).
+- **Write-back:** debounced (2 s) after reconcile and after any mutation, from
+  `afterMutation` — never while only hydrated.
+- **Strict mode:** per-file `errors` are cached with the entry, so the
+  reconcile Notice still reports errors living in unchanged files.
+
 ## Data-model change (the spine)
 
 `TaskEngine` stops holding a flat `Task[]` as the source of truth and instead
