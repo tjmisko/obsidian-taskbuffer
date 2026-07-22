@@ -1,4 +1,4 @@
-// view.ts — the Task Buffer custom views. A virtualized, 100%-keyboard list:
+// view.ts — the Taskbuffer custom views. A virtualized, 100%-keyboard list:
 // horizon-bucketed tasks render as compact rows of a fixed, uniform height (the
 // body is vertically centered and may wrap to two lines), but only the rows in
 // (and just around) the viewport are ever in the DOM, so render time is constant
@@ -572,9 +572,8 @@ export class TaskbufferView extends TaskbufferViewBase {
 	}
 
 	getDisplayText(): string {
-		// "Task Buffer" is the plugin's proper name (matches manifest), not free UI copy.
-		// eslint-disable-next-line obsidianmd/ui/sentence-case
-		return "Task Buffer";
+		// "Taskbuffer" is the plugin's proper name (matches manifest), not free UI copy.
+		return "Taskbuffer";
 	}
 }
 
@@ -589,7 +588,6 @@ export class TaskbufferFullView extends TaskbufferViewBase {
 	}
 
 	getDisplayText(): string {
-		// eslint-disable-next-line obsidianmd/ui/sentence-case
-		return "Task Buffer";
+		return "Taskbuffer";
 	}
 }

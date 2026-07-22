@@ -1,4 +1,4 @@
-# Task Buffer — parity design & build notes
+# Taskbuffer — parity design & build notes
 
 This plugin ports **taskbuffer.nvim** (canonical pure-Lua impl at
 `~/Projects/taskbuffer.nvim`, branch `main`) to an Obsidian plugin, aiming for

@@ -1,4 +1,4 @@
-# Task Buffer
+# Taskbuffer
 
 Aggregate the inline tasks scattered across your notes into a single, time-bucketed
 view — **Overdue, Today, Tomorrow, This Week, This Month, This Year, …** — and
@@ -34,7 +34,7 @@ task. All of this is configurable in settings.
 
 ## Using it
 
-Open the view with the ribbon icon or the **Task buffer: Open** command. In the
+Open the view with the ribbon icon or the **Taskbuffer: Open in sidebar** command. In the
 view:
 
 - **Click the checkbox** to complete a task (records a completion time).
@@ -60,7 +60,7 @@ tags).
 
 ## Privacy
 
-Task Buffer runs entirely offline. It only reads and writes Markdown files inside
+Taskbuffer runs entirely offline. It only reads and writes Markdown files inside
 your vault, stores its settings and the running-timer state in the plugin's own
 data, and makes **no network requests** and collects **no telemetry**.
 
