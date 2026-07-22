@@ -137,8 +137,12 @@
 	justify-self: end;
 }
 
-.taskbuffer-row:hover {
-	background-color: var(--background-modifier-hover);
+/* Hover highlight only for real pointers: on touch screens (iOS) :hover
+   sticks to the last-touched row, leaving a stray grey bar after scrolling. */
+@media (hover: hover) {
+	.taskbuffer-row:hover {
+		background-color: var(--background-modifier-hover);
+	}
 }
 
 .taskbuffer-row.is-selected {
