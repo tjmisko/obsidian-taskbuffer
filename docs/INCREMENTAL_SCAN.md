@@ -67,16 +67,19 @@ candidate(file) :=
 
 ### C. Per-file incremental updates (no more full rescans)
 
-Replace the debounced full-vault rescan with a per-file update:
+Replace the debounced full-vault rescan with readless per-file updates:
 
-- `metadataCache.on("changed", file)` → re-parse **only that file**, re-enrich
-  from its frontmatter, splice into the cache, rebuild the flat list (~1 ms),
-  re-render. Covers content edits, frontmatter edits, and a file *gaining* a
-  project task.
-- `vault.on("delete"/"rename")` → drop / re-key that file's entry.
-- **Verbs** (`complete`, `defer`, timer, date-shift, `create`, …) currently call
-  `refresh()` (full scan) after writing. They switch to `updateFile(path)` for
-  the one file they touched → verbs become instant.
+- `metadataCache.on("changed", file, data, cache)` → parse the supplied `data`
+  and frontmatter, splice the entry, rebuild the flat list, and re-render.
+- Text-changing verbs retain the transformed string from `Vault.process()` and
+  update from it immediately instead of calling `cachedRead()` afterward.
+- `vault.on("delete")` drops the entry. Rename drops the old path and keeps one
+  explicitly labeled read fallback because metadata changed is not emitted.
+- Payloads are coalesced by path for 150 ms; removals run before updates and the
+  completed batch renders and persists once.
+
+See [`READLESS_INCREMENTAL_UPDATES.md`](./READLESS_INCREMENTAL_UPDATES.md) for
+the current data flow, batching rules, remaining read paths, and diagnostics.
 
 ### D. Persisted scan cache (mtime-incremental cold-start reconcile)
 
@@ -110,7 +113,9 @@ holds a per-file map; the flat list is derived:
 interface FileEntry {
   path: string;
   mtime: number;          // TFile.stat.mtime
+  size: number;           // TFile.stat.size
   enriched: Task[];       // per-file enrichment output (incl. its project task)
+  errors: DateError[];    // strict-mode errors isolated to this file
 }
 
 class TaskEngine {
@@ -118,7 +123,8 @@ class TaskEngine {
   tasks: Task[] = [];                       // derived: concat of byFile.*.enriched
   hydrate(snapshotTasks: Task[]): void;     // Pillar A — paint without byFile
   reconcile(): Promise<void>;               // Pillar B — read candidates, fill byFile
-  updateFile(path): Promise<void>;          // Pillar C — re-parse one file
+  updateFileFromContent(snapshot, origin): Promise<void>; // Pillar C — no read
+  updateFile(path): Promise<void>;          // rename/exceptional read fallback
   removeFile(path): void;                   // Pillar C — delete/rename
   snapshot(): Task[];                       // dated + capped undated, for persistence
 }
@@ -132,12 +138,12 @@ class TaskEngine {
   (the four passes + project-task append, for one file). Reimplement the existing
   `enrichTasks` as a thin loop over files calling it, so current tests/behavior
   are unchanged.
-- **`scan.ts`** — add pure `selectCandidates(fileInfos)` (testable without
-  Obsidian: takes `{path, listItems, frontmatter}[]`, returns candidate paths);
-  add `readFileEntry(app, file, ctx): Promise<FileEntry>`; refactor `scanVault`
-  to read candidates only.
-- **`engine.ts`** — the data-model change above; verbs call `updateFile` instead
-  of `refresh`.
+- **`file-entry.ts`** — pure `FileContentSnapshot` → `FileEntry` parsing and
+  enrichment, shared by reads, metadata events, and mutations.
+- **`scan.ts`** — pure candidate selection plus read-based reconciliation;
+  `readFileEntry` delegates to the snapshot parser after one `cachedRead`.
+- **`engine.ts`** — the data-model change above; normal verbs call
+  `updateFileFromContent` using their transformed text.
 - **`main.ts`** — load+hydrate snapshot in `loadState`; `reconcile()` in
   `onLayoutReady`; swap the debounced full-scan event wiring for per-file
   handlers; debounced `writeSnapshot()`.
@@ -154,14 +160,18 @@ class TaskEngine {
    invalidation, cold-paint flow. Tests for trim/hydrate + invalidation.
 4. **Incremental wiring (C)** — per-file event handlers replace the debounced
    full rescan; `updateFile`/`removeFile`/rename. Verify via the perf logs.
+5. **Readless hot path** — metadata events and text mutations supply immutable
+   `FileContentSnapshot`s; only reconciliation, refresh, and rename retain reads.
+   Add pure parser and batch-ordering tests plus phase-level diagnostics.
 
 ## Testing
 
 Obsidian-touching glue (the `App`/`Vault`/`metadataCache` calls) stays thin;
 the decisions are pushed into pure, vitest-able helpers: `enrichFileTasks`,
-`selectCandidates`, snapshot trim/hydrate, `settingsHash`. Engine orchestration
-is verified against the `[taskbuffer]` perf logs (cold paint, reconcile,
-per-file update should all show their new budgets).
+`selectCandidates`, `fileEntryFromSnapshot`, `PendingFileChanges`, snapshot
+trim/hydrate, and `settingsHash`. Engine orchestration is verified against the
+`[taskbuffer]` perf logs (cold paint, reconcile, and per-file update should all
+show their new budgets).
 
 ## Risks / edge cases
 
@@ -174,7 +184,7 @@ per-file update should all show their new budgets).
 - **Project-only files** (no task lines, `project` frontmatter) → covered by the
   `isProjectFile` candidate branch and by `enrichFileTasks` appending the
   synthetic task even when `raw` is empty.
-- **Event storms** (sync writing many files) → batch `updateFile` per path, then
-  a single debounced render + snapshot write.
+- **Event storms** (sync writing many files) → retain the latest payload per
+  path, then perform a single render + persistence cycle for each drained batch.
 - **Strict-mode date errors** were surfaced from the full scan; with incremental
   updates they surface per changed file. Acceptable; low priority.

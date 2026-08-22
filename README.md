@@ -80,7 +80,9 @@ npm run lint
 
 The parsing, frontmatter, horizon, and rendering logic is pure TypeScript with no
 Obsidian dependency, so it is unit-tested directly under Node. See `docs/PARITY.md`
-for the design and the parity contract with taskbuffer.nvim.
+for the parity contract with taskbuffer.nvim, and
+`docs/READLESS_INCREMENTAL_UPDATES.md` for the mobile-friendly incremental-update
+architecture.
 
 ## License
 
