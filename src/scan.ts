@@ -4,17 +4,25 @@
 // then enrich from frontmatter. Frontmatter comes parsed from the metadataCache,
 // so we never hand-parse YAML.
 //
-// Reads are per-file (`readFileEntry`) so a full scan and a single-file
-// incremental update share the same code path; the engine holds the resulting
-// per-file entries and derives its flat task list from them.
+// Startup/manual scans read per-file via `readFileEntry`; metadata events and
+// Taskbuffer mutations bypass the vault read and feed their content directly to
+// the same pure snapshot parser. The engine holds the resulting per-file entries
+// and derives its flat task list from them.
 
 import { App, TFile, normalizePath } from "obsidian";
 import { TaskbufferSettings } from "./config";
-import { buildParseContext, parseTask, ParseContext, RawMatch } from "./parse/parse";
-import { enrichFileTasks, projectTaskFor, FileMeta } from "./frontmatter";
+import { buildParseContext, ParseContext } from "./parse/parse";
 import { FileCandidateInfo, openCharsFromSettings, selectCandidates } from "./candidates";
 import { perfStart } from "./perf";
-import { Task, DateError } from "./types";
+import { DateError } from "./types";
+import {
+	fileEntryFromSnapshot,
+	type FileContentSnapshot,
+	type FileEntry,
+} from "./file-entry";
+
+export { fileEntryFromSnapshot } from "./file-entry";
+export type { FileContentSnapshot, FileEntry } from "./file-entry";
 
 /** Is `path` inside one of the configured source folders? Empty list = whole vault. */
 export function fileInSources(path: string, sources: string[]): boolean {
@@ -24,15 +32,6 @@ export function fileInSources(path: string, sources: string[]): boolean {
 		if (src === "" || src === "/" || src === ".") return true;
 		return path === src || path.startsWith(src + "/");
 	});
-}
-
-/** One scanned file's enriched tasks (regular tasks + its synthetic project task). */
-export interface FileEntry {
-	path: string; // vault-relative file path
-	mtime: number; // TFile.stat.mtime
-	size: number; // TFile.stat.size; mtime+size together decide scan-cache reuse
-	enriched: Task[]; // per-file enrichment output (regular tasks, then project task)
-	errors: DateError[]; // strict-mode date errors from this file's parse
 }
 
 export interface ScanResult {
@@ -53,29 +52,36 @@ export async function readFileEntry(
 	file: TFile,
 	ctx: ParseContext,
 	settings: TaskbufferSettings,
+	timing?: FileReadTiming,
 ): Promise<FileEntry> {
+	const readStart = performance.now();
 	const content = await app.vault.cachedRead(file);
-	// Parse + enrichment are synchronous after the single await above, so even
-	// with concurrent batch reads the shared ctx grows only by THIS file's errors
-	// between here and the slice below.
-	const errStart = ctx.dateErrors?.length ?? 0;
-	const lines = content.split("\n");
-	const raw: Task[] = [];
-	for (let i = 0; i < lines.length; i++) {
-		const match: RawMatch = { path: file.path, lineNumber: i + 1, text: lines[i] as string };
-		const task = parseTask(match, ctx);
-		if (task) raw.push(task);
-	}
-	const meta: FileMeta = {
+	const readMs = performance.now() - readStart;
+	const snapshot: FileContentSnapshot = {
 		path: file.path,
 		basename: file.basename,
+		mtime: file.stat.mtime,
+		size: file.stat.size,
+		content,
 		frontmatter: app.metadataCache.getFileCache(file)?.frontmatter ?? null,
 	};
-	const enriched = enrichFileTasks(raw, meta, settings);
-	const projectTask = projectTaskFor(meta, settings);
-	if (projectTask) enriched.push(projectTask);
-	const errors = ctx.dateErrors?.slice(errStart) ?? [];
-	return { path: file.path, mtime: file.stat.mtime, size: file.stat.size, enriched, errors };
+	const parseStart = performance.now();
+	const entry = fileEntryFromSnapshot(snapshot, ctx, settings);
+	if (timing) {
+		timing.vaultReadMs = readMs;
+		timing.parseMs = performance.now() - parseStart;
+		timing.byteCount = snapshot.size;
+		timing.lineCount = content.split("\n").length;
+	}
+	return entry;
+}
+
+/** Optional phase timings for the exceptional single-file read fallback. */
+export interface FileReadTiming {
+	vaultReadMs: number;
+	parseMs: number;
+	byteCount: number;
+	lineCount: number;
 }
 
 let warnedOpenGlyph = false;

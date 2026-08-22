@@ -5,7 +5,6 @@ import {
 	Notice,
 	Platform,
 	Plugin,
-	TAbstractFile,
 	TFile,
 	WorkspaceLeaf,
 	debounce,
@@ -18,6 +17,8 @@ import { PersistedSnapshot } from "./snapshot";
 import { loadScanCache, saveScanCache, scanCacheDbName } from "./scancache";
 import { buildParseContext, parseTask } from "./parse/parse";
 import { fileForPath, fileInSources } from "./scan";
+import type { FileContentSnapshot } from "./file-entry";
+import { PendingFileChanges } from "./file-changes";
 import {
 	TaskbufferView,
 	TaskbufferFullView,
@@ -51,9 +52,11 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 	private scanCacheLoad: Promise<void> = Promise.resolve();
 	/** Debounced scan-cache write — the blob is O(all tasks), so coalesce hard. */
 	private writeScanCache = debounce(() => void this.persistScanCache(), 2000, false);
-	/** Pillar C: file paths to re-read / drop, batched and flushed together. */
-	private dirtyPaths = new Set<string>();
-	private removedPaths = new Set<string>();
+	/** Pillar C: latest metadata payload per path, batched and flushed together. */
+	private fileChanges = new PendingFileChanges();
+	/** Rename is the exceptional path that still requires a vault read. */
+	private fallbackPaths = new Set<string>();
+	private applyingFileChanges = false;
 	private flushFileChanges = debounce(() => void this.applyFileChanges(), 150, false);
 	/** Ring buffer of console output + uncaught errors, dumped via the debug-log commands. */
 	private logBuffer = new LogBuffer();
@@ -99,22 +102,25 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 
 		// Keep startup light: the snapshot is already painted (hydrateFromSnapshot);
 		// reconcile against the vault and wire file events only after layout is
-		// ready (Obsidian fires `create` for every file during vault init).
+		// ready, avoiding the initial burst of vault-indexing events.
 		this.app.workspace.onLayoutReady(() => {
 			const end = perfStart("initial reconcile (onLayoutReady)");
 			void this.startupReconcile().then(() => end({ tasks: this.engine.tasks.length }));
 
 			// Pillar C: per-file incremental updates replace the full-vault rescan.
-			// `changed` (re-index after a content/frontmatter edit) covers modifies;
-			// rename isn't reported to metadataCache, so the vault rename event
-			// re-keys the entry. A file leaving `sources` is dropped, not re-read.
-			this.registerEvent(this.app.metadataCache.on("changed", (file) => this.queueFileUpdate(file)));
-			this.registerEvent(this.app.vault.on("create", (file) => this.queueFileUpdate(file)));
+			// `changed` supplies authoritative content + frontmatter for creates and
+			// modifies. Rename isn't reported to metadataCache, so it retains one
+			// explicitly labeled read fallback. Files outside `sources` are dropped.
+			this.registerEvent(
+				this.app.metadataCache.on("changed", (file, data, cache) =>
+					this.queueFileUpdate(file, data, cache.frontmatter ?? null),
+				),
+			);
 			this.registerEvent(this.app.vault.on("delete", (file) => this.queueFileRemove(file.path)));
 			this.registerEvent(
 				this.app.vault.on("rename", (file, oldPath) => {
 					this.queueFileRemove(oldPath);
-					this.queueFileUpdate(file);
+					if (file instanceof TFile) this.queueFileFallback(file);
 				}),
 			);
 		});
@@ -284,38 +290,75 @@ export default class TaskbufferPlugin extends Plugin implements TaskbufferHost {
 
 	// ── incremental file updates (Pillar C) ─────────────────────────────────────
 
-	/** Queue a re-read of one file (create / content or frontmatter change). */
-	private queueFileUpdate(file: TAbstractFile): void {
-		if (!(file instanceof TFile) || file.extension !== "md") return;
+	/** Queue the immutable payload from a metadata create/content/frontmatter event. */
+	private queueFileUpdate(
+		file: TFile,
+		content: string,
+		frontmatter: Record<string, unknown> | null,
+	): void {
+		if (file.extension !== "md") return;
 		if (!fileInSources(file.path, this.settings.sources)) {
-			// Outside the configured sources — make sure it isn't lingering, don't read it.
+			// Outside the configured sources — make sure it isn't lingering.
 			this.queueFileRemove(file.path);
 			return;
 		}
-		this.removedPaths.delete(file.path);
-		this.dirtyPaths.add(file.path);
+		const snapshot: FileContentSnapshot = Object.freeze({
+			path: file.path,
+			basename: file.basename,
+			mtime: file.stat.mtime,
+			size: file.stat.size,
+			content,
+			frontmatter: frontmatter === null ? null : structuredClone(frontmatter),
+		});
+		this.fallbackPaths.delete(file.path);
+		this.fileChanges.queueUpdate(snapshot);
+		this.flushFileChanges();
+	}
+
+	/** Queue the read-based rename fallback when the renamed file remains in scope. */
+	private queueFileFallback(file: TFile): void {
+		if (file.extension !== "md" || !fileInSources(file.path, this.settings.sources)) {
+			this.queueFileRemove(file.path);
+			return;
+		}
+		this.fallbackPaths.add(file.path);
 		this.flushFileChanges();
 	}
 
 	/** Queue dropping one file's tasks (delete / rename-away / left sources). */
 	private queueFileRemove(path: string): void {
-		this.dirtyPaths.delete(path);
-		this.removedPaths.add(path);
+		this.fallbackPaths.delete(path);
+		this.fileChanges.queueRemoval(path);
 		this.flushFileChanges();
 	}
 
 	/** Apply the batched file changes as per-file engine updates, then render once. */
 	private async applyFileChanges(): Promise<void> {
-		const removed = [...this.removedPaths];
-		const dirty = [...this.dirtyPaths];
-		this.removedPaths.clear();
-		this.dirtyPaths.clear();
-		if (removed.length === 0 && dirty.length === 0) return;
-		const end = perfStart("applyFileChanges");
-		for (const path of removed) this.engine.removeFile(path);
-		for (const path of dirty) await this.engine.updateFile(path);
-		end({ updated: dirty.length, removed: removed.length, tasks: this.engine.tasks.length });
-		this.afterMutation();
+		if (this.applyingFileChanges) return;
+		const { removals, updates } = this.fileChanges.drain();
+		const fallbacks = this.fallbackPaths;
+		this.fallbackPaths = new Set();
+		if (removals.length === 0 && updates.length === 0 && fallbacks.size === 0) return;
+
+		this.applyingFileChanges = true;
+		try {
+			const end = perfStart("applyFileChanges");
+			for (const path of removals) this.engine.removeFile(path);
+			for (const snapshot of updates) await this.engine.updateFileFromContent(snapshot, "metadata");
+			for (const path of fallbacks) await this.engine.updateFile(path);
+			end({
+				metadata: updates.length,
+				fallbacks: fallbacks.size,
+				removed: removals.length,
+				tasks: this.engine.tasks.length,
+			});
+			this.afterMutation();
+		} finally {
+			this.applyingFileChanges = false;
+			// A drain swaps buffers; arrivals during the awaits above are still
+			// pending and become a separate debounced batch.
+			if (this.fileChanges.hasPending() || this.fallbackPaths.size > 0) this.flushFileChanges();
+		}
 	}
 
 	private updateStatusBar(): void {

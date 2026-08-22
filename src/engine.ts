@@ -8,7 +8,12 @@ import { TaskbufferSettings } from "./config";
 import { Task } from "./types";
 import { buildParseContext, ParseContext, replaceInlineDueDate } from "./parse/parse";
 import { CurrentTask, formatMarker } from "./state";
-import { scanVault, readFileEntry, fileForPath, FileEntry } from "./scan";
+import { scanVault, readFileEntry, fileForPath, type FileEntry, type FileReadTiming } from "./scan";
+import {
+	fileEntryFromSnapshot,
+	snapshotLineCount,
+	type FileContentSnapshot,
+} from "./file-entry";
 import { summarizeDateErrors } from "./errors";
 import { buildSections, collectTags, DisplaySection, RenderOptions } from "./render/rows";
 import { parseFrontmatterDue } from "./frontmatter";
@@ -33,6 +38,8 @@ export interface TimerStore {
 	set(task: CurrentTask | null): Promise<void>;
 }
 
+export type FileUpdateOrigin = "metadata" | "mutation";
+
 export class TaskEngine {
 	private app: App;
 	private timer: TimerStore;
@@ -43,8 +50,8 @@ export class TaskEngine {
 	/** Derived flat list (regular tasks, then synthetic project tasks). */
 	tasks: Task[] = [];
 	/** True between `hydrate` and the first `reconcile`: `tasks` holds only a
-	 * persisted snapshot and `byFile` is empty, so a mutation must reconcile first
-	 * or `rebuildFlat` would wipe the list. */
+	 * persisted snapshot and `byFile` is empty, so an incremental update must
+	 * reconcile first or `rebuildFlat` would wipe the list. */
 	private hydratedOnly = false;
 	/** The single in-flight reconcile, if any — so concurrent callers share one
 	 * scan instead of racing two wholesale `byFile` reassignments. */
@@ -75,8 +82,8 @@ export class TaskEngine {
 
 	/**
 	 * Pillar A: adopt a persisted snapshot as the flat list so the view can paint
-	 * before any scan. `byFile` stays empty until {@link reconcile}; any mutation
-	 * in this window reconciles first (see {@link updateFile}).
+	 * before any scan. `byFile` stays empty until {@link reconcile}; any update in
+	 * this window reconciles first (see {@link updateFileFromContent}).
 	 */
 	hydrate(snapshotTasks: Task[]): void {
 		this.tasks = snapshotTasks;
@@ -138,41 +145,100 @@ export class TaskEngine {
 		await this.reconcile();
 	}
 
-	/**
-	 * Re-read ONE file and splice it into the per-file cache (Pillar C). Removes
-	 * the entry when the file is gone or yields no tasks. Verbs call this for the
-	 * single file they touched instead of rescanning the whole vault.
-	 */
+	/** Re-read one file as an explicitly labeled fallback (currently rename and
+	 * callers that genuinely lack content). Normal metadata/mutation updates use
+	 * {@link updateFileFromContent} and perform no vault read. */
 	async updateFile(path: string): Promise<void> {
-		// A reconcile rebuilds byFile wholesale and now yields mid-scan, so wait for
-		// any in-flight one to finish — otherwise its final `byFile =` could clobber
-		// the splice below.
-		if (this.reconcilePromise) await this.reconcilePromise;
-		// If we are still showing only the hydrated snapshot, reconcile first so a
-		// single-file splice doesn't collapse the list to just this file.
-		if (this.hydratedOnly) await this.reconcile();
 		const end = perfStart("engine.updateFile");
+		const reconcileWaitMs = await this.waitUntilAuthoritative();
 		const file = fileForPath(this.app, path);
 		if (!file) {
-			this.removeFile(path);
-			end({ file: path, removed: true });
+			const rebuildMs = this.removeFile(path);
+			end({
+				origin: "vault-fallback",
+				file: path,
+				removed: true,
+				reconcileWaitMs,
+				vaultReadMs: 0,
+				parseMs: 0,
+				rebuildMs,
+				vaultReads: 0,
+				byteCount: 0,
+				lineCount: 0,
+				fileTasks: 0,
+				totalTasks: this.tasks.length,
+			});
 			return;
 		}
 		const ctx = this.ctx;
-		const entry = await readFileEntry(this.app, file, ctx, this.settings);
+		const timing: FileReadTiming = { vaultReadMs: 0, parseMs: 0, byteCount: 0, lineCount: 0 };
+		const entry = await readFileEntry(this.app, file, ctx, this.settings, timing);
 		if (entry.enriched.length > 0) this.byFile.set(entry.path, entry);
 		else this.byFile.delete(entry.path);
-		this.rebuildFlat();
-		end({ file: entry.path, fileTasks: entry.enriched.length, tasks: this.tasks.length });
-		const errors = ctx.dateErrors ?? [];
+		const rebuildMs = this.rebuildFlat();
+		end({
+			origin: "vault-fallback",
+			file: entry.path,
+			reconcileWaitMs,
+			vaultReadMs: timing.vaultReadMs,
+			parseMs: timing.parseMs,
+			rebuildMs,
+			vaultReads: 1,
+			byteCount: timing.byteCount,
+			lineCount: timing.lineCount,
+			fileTasks: entry.enriched.length,
+			totalTasks: this.tasks.length,
+		});
+		this.reportErrors(entry.errors);
+	}
+
+	/** Parse supplied event/mutation content and splice it into the per-file cache. */
+	async updateFileFromContent(snapshot: FileContentSnapshot, origin: FileUpdateOrigin): Promise<void> {
+		const end = perfStart("engine.updateFile");
+		const reconcileWaitMs = await this.waitUntilAuthoritative();
+		const ctx = this.ctx;
+		const parseStart = performance.now();
+		const entry = fileEntryFromSnapshot(snapshot, ctx, this.settings);
+		const parseMs = performance.now() - parseStart;
+		if (entry.enriched.length > 0) this.byFile.set(entry.path, entry);
+		else this.byFile.delete(entry.path);
+		const rebuildMs = this.rebuildFlat();
+		end({
+			origin,
+			file: entry.path,
+			reconcileWaitMs,
+			vaultReadMs: 0,
+			parseMs,
+			rebuildMs,
+			vaultReads: 0,
+			byteCount: snapshot.size,
+			lineCount: snapshotLineCount(snapshot),
+			fileTasks: entry.enriched.length,
+			totalTasks: this.tasks.length,
+		});
+		this.reportErrors(entry.errors);
+	}
+
+	/** Wait for the per-file map to become authoritative before splicing it. */
+	private async waitUntilAuthoritative(): Promise<number> {
+		const start = performance.now();
+		// A reconcile rebuilds byFile wholesale and yields mid-scan. Joining it
+		// prevents that final assignment from clobbering this incremental update.
+		if (this.reconcilePromise) await this.reconcilePromise;
+		// A hydrated snapshot has no byFile map yet; fill it before one-file update.
+		if (this.hydratedOnly) await this.reconcile();
+		return performance.now() - start;
+	}
+
+	private reportErrors(errors: FileEntry["errors"]): void {
 		if (this.settings.strict && errors.length > 0) {
 			new Notice(summarizeDateErrors(errors), 8000);
 		}
 	}
 
 	/** Drop a file's entry from the cache (delete / rename-away). */
-	removeFile(path: string): void {
-		if (this.byFile.delete(path)) this.rebuildFlat();
+	removeFile(path: string): number {
+		return this.byFile.delete(path) ? this.rebuildFlat() : 0;
 	}
 
 	/**
@@ -181,7 +247,8 @@ export class TaskEngine {
 	 * scan produced, so the view, `allTags`, and snapshots stay stable regardless
 	 * of how byFile was assembled (full scan vs. incremental updates).
 	 */
-	private rebuildFlat(): void {
+	private rebuildFlat(): number {
+		const start = performance.now();
 		const regular: Task[] = [];
 		const projects: Task[] = [];
 		for (const entry of this.byFile.values()) {
@@ -191,6 +258,7 @@ export class TaskEngine {
 			}
 		}
 		this.tasks = regular.concat(projects);
+		return performance.now() - start;
 	}
 
 	sections(opts: RenderOptions): DisplaySection[] {
@@ -207,19 +275,44 @@ export class TaskEngine {
 
 	// ── write helpers ─────────────────────────────────────────────────────────
 
-	private async transform(path: string, fn: (content: string) => string): Promise<boolean> {
+	private async transform(
+		path: string,
+		fn: (content: string) => string,
+	): Promise<FileContentSnapshot | null> {
 		const file = fileForPath(this.app, path);
 		if (!file) {
 			new Notice(`File not found: ${path}`);
-			return false;
+			return null;
 		}
+		let transformed: string | null = null;
 		try {
-			await this.app.vault.process(file, fn);
-			return true;
+			await this.app.vault.process(file, (content) => {
+				transformed = fn(content);
+				return transformed;
+			});
+			return transformed === null ? null : this.contentSnapshot(file, transformed);
 		} catch (e) {
 			new Notice(e instanceof Error ? e.message : String(e));
-			return false;
+			return null;
 		}
+	}
+
+	private contentSnapshot(file: TFile, content: string): FileContentSnapshot {
+		const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter ?? null;
+		return {
+			path: file.path,
+			basename: file.basename,
+			mtime: file.stat.mtime,
+			size: file.stat.size,
+			content,
+			frontmatter: frontmatter === null ? null : structuredClone(frontmatter),
+		};
+	}
+
+	private async updateSnapshots(snapshots: Iterable<FileContentSnapshot>): Promise<void> {
+		const latest = new Map<string, FileContentSnapshot>();
+		for (const snapshot of snapshots) latest.set(snapshot.path, snapshot);
+		for (const snapshot of latest.values()) await this.updateFileFromContent(snapshot, "mutation");
 	}
 
 	// ── verbs ───────────────────────────────────────────────────────────────
@@ -227,39 +320,34 @@ export class TaskEngine {
 	async complete(task: Task): Promise<void> {
 		const ctx = this.ctx;
 		const now = this.nowEpoch();
-		if (await this.transform(task.filePath, (c) => actions.completeAt(c, task.lineNumber, ctx, now))) {
-			await this.updateFile(task.filePath);
-		}
+		const snapshot = await this.transform(task.filePath, (c) => actions.completeAt(c, task.lineNumber, ctx, now));
+		if (snapshot) await this.updateFileFromContent(snapshot, "mutation");
 	}
 
 	async check(task: Task): Promise<void> {
 		const ctx = this.ctx;
-		if (await this.transform(task.filePath, (c) => actions.check(c, task.lineNumber, ctx))) {
-			await this.updateFile(task.filePath);
-		}
+		const snapshot = await this.transform(task.filePath, (c) => actions.check(c, task.lineNumber, ctx));
+		if (snapshot) await this.updateFileFromContent(snapshot, "mutation");
 	}
 
 	async defer(task: Task): Promise<void> {
 		const ctx = this.ctx;
 		const now = this.nowEpoch();
-		if (await this.transform(task.filePath, (c) => actions.defer(c, task.lineNumber, ctx, now))) {
-			await this.updateFile(task.filePath);
-		}
+		const snapshot = await this.transform(task.filePath, (c) => actions.defer(c, task.lineNumber, ctx, now));
+		if (snapshot) await this.updateFileFromContent(snapshot, "mutation");
 	}
 
 	async markIrrelevant(task: Task): Promise<void> {
 		const ctx = this.ctx;
 		const now = this.nowEpoch();
-		if (await this.transform(task.filePath, (c) => actions.irrelevant(c, task.lineNumber, ctx, now))) {
-			await this.updateFile(task.filePath);
-		}
+		const snapshot = await this.transform(task.filePath, (c) => actions.irrelevant(c, task.lineNumber, ctx, now));
+		if (snapshot) await this.updateFileFromContent(snapshot, "mutation");
 	}
 
 	async unsetIrrelevant(task: Task): Promise<void> {
 		const ctx = this.ctx;
-		if (await this.transform(task.filePath, (c) => actions.unset(c, task.lineNumber, ctx))) {
-			await this.updateFile(task.filePath);
-		}
+		const snapshot = await this.transform(task.filePath, (c) => actions.unset(c, task.lineNumber, ctx));
+		if (snapshot) await this.updateFileFromContent(snapshot, "mutation");
 	}
 
 	// ── timer ─────────────────────────────────────────────────────────────────
@@ -268,23 +356,29 @@ export class TaskEngine {
 		const ctx = this.ctx;
 		const now = this.nowEpoch();
 		const existing = this.timer.get();
-		if (existing) await this.appendStop(existing, now);
-		const ok = await this.transform(task.filePath, (c) =>
+		const snapshots: FileContentSnapshot[] = [];
+		if (existing) {
+			const stopped = await this.appendStop(existing, now);
+			if (stopped) snapshots.push(stopped);
+		}
+		const started = await this.transform(task.filePath, (c) =>
 			mutate.appendToLine(c, task.lineNumber, formatMarker("start", now, ctx)),
 		);
-		if (ok) {
+		if (started) {
+			snapshots.push(started);
 			await this.timer.set({ startTime: now, name: task.body, filePath: task.filePath, lineNumber: task.lineNumber });
 			new Notice(`Started: ${task.body}`);
-			// Stopping an existing timer wrote to its file too; update both.
-			if (existing && existing.filePath !== task.filePath) await this.updateFile(existing.filePath);
-			await this.updateFile(task.filePath);
 		}
+		await this.updateSnapshots(snapshots);
 	}
 
-	private async appendStop(ct: CurrentTask, now: number): Promise<void> {
+	private async appendStop(ct: CurrentTask, now: number): Promise<FileContentSnapshot | null> {
 		const ctx = this.ctx;
-		await this.transform(ct.filePath, (c) => mutate.appendToLine(c, ct.lineNumber, formatMarker("stop", now, ctx)));
+		const snapshot = await this.transform(ct.filePath, (c) =>
+			mutate.appendToLine(c, ct.lineNumber, formatMarker("stop", now, ctx)),
+		);
 		await this.timer.set(null);
+		return snapshot;
 	}
 
 	async stopTimer(): Promise<void> {
@@ -293,9 +387,9 @@ export class TaskEngine {
 			new Notice("No task running");
 			return;
 		}
-		await this.appendStop(ct, this.nowEpoch());
+		const snapshot = await this.appendStop(ct, this.nowEpoch());
 		new Notice(`Stopped: ${ct.name}`);
-		await this.updateFile(ct.filePath);
+		if (snapshot) await this.updateFileFromContent(snapshot, "mutation");
 	}
 
 	async completeTimer(): Promise<void> {
@@ -306,11 +400,11 @@ export class TaskEngine {
 		}
 		const ctx = this.ctx;
 		const now = this.nowEpoch();
-		const ok = await this.transform(ct.filePath, (c) => actions.completeAt(c, ct.lineNumber, ctx, now));
-		if (ok) {
+		const snapshot = await this.transform(ct.filePath, (c) => actions.completeAt(c, ct.lineNumber, ctx, now));
+		if (snapshot) {
 			await this.timer.set(null);
 			new Notice(`Completed: ${ct.name}`);
-			await this.updateFile(ct.filePath);
+			await this.updateFileFromContent(snapshot, "mutation");
 		}
 	}
 
@@ -323,20 +417,24 @@ export class TaskEngine {
 		const header = this.settings.inbox.header;
 		const line = actions.newTaskLine(body.trim(), ctx);
 		const existing = fileForPath(this.app, path);
+		let snapshot: FileContentSnapshot | null = null;
 		if (!existing) {
 			await this.ensureParentFolder(path);
 			const content = header ? mutate.insertAfterHeader(null, header, line) : mutate.appendToFile(null, line);
 			try {
-				await this.app.vault.create(path, content);
+				const created = await this.app.vault.create(path, content);
+				snapshot = this.contentSnapshot(created, content);
 			} catch (e) {
 				new Notice(e instanceof Error ? e.message : String(e));
 				return;
 			}
 		} else {
-			await this.transform(path, (c) => (header ? mutate.insertAfterHeader(c, header, line) : mutate.appendToFile(c, line)));
+			snapshot = await this.transform(path, (c) =>
+				header ? mutate.insertAfterHeader(c, header, line) : mutate.appendToFile(c, line),
+			);
 		}
 		new Notice(`Added: ${body.trim()}`);
-		await this.updateFile(path);
+		if (snapshot) await this.updateFileFromContent(snapshot, "mutation");
 	}
 
 	private async ensureParentFolder(path: string): Promise<void> {
@@ -373,7 +471,7 @@ export class TaskEngine {
 		const file = fileForPath(this.app, task.filePath);
 		if (!file) return false;
 		let edit: LineEdit | null = null;
-		await this.app.vault.process(file, (content) => {
+		const snapshot = await this.transform(task.filePath, (content) => {
 			const lines = content.split("\n");
 			const ln = lines[task.lineNumber - 1];
 			if (ln === undefined) return content;
@@ -383,9 +481,9 @@ export class TaskEngine {
 			lines[task.lineNumber - 1] = replaced;
 			return lines.join("\n");
 		});
-		if (edit) {
+		if (edit && snapshot) {
 			this.pushUndo([edit]);
-			await this.updateFile(task.filePath);
+			await this.updateFileFromContent(snapshot, "mutation");
 			return true;
 		}
 		return false;
@@ -408,8 +506,7 @@ export class TaskEngine {
 			fm[dueKey] = this.fmDueString(addDays(parsed.epoch, deltaDays), parsed.time);
 			changed = true;
 		});
-		if (changed) await this.updateFile(task.filePath);
-		else new Notice("No due date to shift");
+		if (!changed) new Notice("No due date to shift");
 	}
 
 	private async setFrontmatterDueToday(task: Task): Promise<void> {
@@ -419,16 +516,9 @@ export class TaskEngine {
 		await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
 			fm[dueKey] = formatEpoch(todayEpoch(), "%Y-%m-%d");
 		});
-		await this.updateFile(task.filePath);
 	}
 
 	// ── undo / redo (date edits only) ───────────────────────────────────────────
-
-	/** Re-read each distinct file touched by a batch of edits (undo/redo). */
-	private async updateEditedFiles(edits: LineEdit[]): Promise<void> {
-		const paths = new Set(edits.map((e) => e.filePath));
-		for (const path of paths) await this.updateFile(path);
-	}
 
 	private pushUndo(edits: LineEdit[]): void {
 		this.undoStack.push(edits);
@@ -449,9 +539,10 @@ export class TaskEngine {
 			new Notice("Nothing to undo");
 			return;
 		}
-		if (await this.applyEdits(edits, "undo")) {
+		const snapshots = await this.applyEdits(edits, "undo");
+		if (snapshots) {
 			this.redoStack.push(edits);
-			await this.updateEditedFiles(edits);
+			await this.updateSnapshots(snapshots.values());
 		} else {
 			this.undoStack.push(edits); // restore on failure
 		}
@@ -463,17 +554,22 @@ export class TaskEngine {
 			new Notice("Nothing to redo");
 			return;
 		}
-		if (await this.applyEdits(edits, "redo")) {
+		const snapshots = await this.applyEdits(edits, "redo");
+		if (snapshots) {
 			this.undoStack.push(edits);
-			await this.updateEditedFiles(edits);
+			await this.updateSnapshots(snapshots.values());
 		} else {
 			this.redoStack.push(edits);
 		}
 	}
 
 	/** Apply each edit's target line, validating the current line matches the expected side. */
-	private async applyEdits(edits: LineEdit[], dir: "undo" | "redo"): Promise<boolean> {
+	private async applyEdits(
+		edits: LineEdit[],
+		dir: "undo" | "redo",
+	): Promise<Map<string, FileContentSnapshot> | null> {
 		const byFile = new Map<string, LineEdit[]>();
+		const snapshots = new Map<string, FileContentSnapshot>();
 		for (const e of edits) {
 			const arr = byFile.get(e.filePath);
 			if (arr) arr.push(e);
@@ -483,10 +579,10 @@ export class TaskEngine {
 			const file = fileForPath(this.app, path);
 			if (!(file instanceof TFile)) {
 				new Notice(`File not found: ${path}`);
-				return false;
+				return null;
 			}
 			let mismatch = false;
-			await this.app.vault.process(file, (content) => {
+			const snapshot = await this.transform(path, (content) => {
 				const lines = content.split("\n");
 				for (const e of fileEdits) {
 					const expected = dir === "undo" ? e.newLine : e.oldLine;
@@ -501,9 +597,11 @@ export class TaskEngine {
 			});
 			if (mismatch) {
 				new Notice("Line changed externally — cannot apply");
-				return false;
+				return null;
 			}
+			if (!snapshot) return null;
+			snapshots.set(path, snapshot);
 		}
-		return true;
+		return snapshots;
 	}
 }
