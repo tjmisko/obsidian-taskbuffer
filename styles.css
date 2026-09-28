@@ -16,9 +16,49 @@
 	display: flex;
 	flex-direction: column;
 	height: 100%;
-	padding: 0;
 	overflow: hidden;
 	outline: none;
+	/* Space the bottom strip must keep clear of fixed overlays (see below).
+	   Custom properties live here, at low specificity, so the platform rules
+	   below can override them. */
+	--taskbuffer-bottom-clearance: 0px;
+}
+
+/* Core pads every `.workspace-leaf-content .view-content` (0,2,0) — including a
+   max(safe-area, 32px) bottom — which beats a bare `.taskbuffer-view`. The view
+   manages its own insets (the strips and --taskbuffer-bottom-clearance). */
+.workspace-leaf-content .view-content.taskbuffer-view {
+	padding: 0;
+}
+
+/* ── bottom clearance (mobile navbar / home indicator) ──────────────────────
+   With the floating ("liquid glass") navbar, core makes .mobile-navbar
+   position:fixed over the bottom of every view and leaves each view to keep
+   its own content clear. Core's variables describe the bar: it sits
+   --navbar-bottom-offset above the screen edge (≥ the safe area), is
+   --navbar-height tall, and rides up with the keyboard. The detail strip's
+   background runs under the glass; its buttons stay above it. */
+
+/* iPad: no navbar, but the home indicator still overlaps the bottom edge. */
+.is-tablet .taskbuffer-view {
+	--taskbuffer-bottom-clearance: var(--safe-area-inset-bottom, 0px);
+}
+
+/* Auto full-screen floats the classic navbar too; core's own spacing fits it. */
+.is-phone.auto-full-screen .taskbuffer-view {
+	--taskbuffer-bottom-clearance: var(--view-bottom-spacing, 0px);
+}
+
+.is-phone.is-floating-nav .taskbuffer-view {
+	--taskbuffer-bottom-clearance: max(
+		0px,
+		calc(var(--navbar-height) + var(--navbar-bottom-offset) - var(--keyboard-height, 0px))
+	);
+}
+
+/* Navbar slid away (hidden-nav mode): only the home indicator remains. */
+.is-phone.is-hidden-nav .taskbuffer-view {
+	--taskbuffer-bottom-clearance: var(--safe-area-inset-bottom, 0px);
 }
 
 /* ── filter banner (non-scrolling header) ─────────────────────────────────── */
@@ -43,6 +83,12 @@
 
 .taskbuffer-view.is-full .taskbuffer-viewport {
 	padding: var(--size-4-3) var(--size-4-6);
+}
+
+/* Detail strip hidden (`m`): the list itself must clear the navbar. After the
+   `.is-full` padding shorthand above, which would otherwise reset it. */
+.taskbuffer-view.is-detail-hidden .taskbuffer-viewport {
+	padding-bottom: calc(var(--size-4-2) + var(--taskbuffer-bottom-clearance));
 }
 
 .taskbuffer-sizer {
@@ -252,12 +298,14 @@
 	max-height: 9rem;
 	overflow-y: auto;
 	padding: var(--size-4-2) var(--size-4-3);
+	padding-bottom: calc(var(--size-4-2) + var(--taskbuffer-bottom-clearance));
 	border-top: 1px solid var(--background-modifier-border);
 	background-color: var(--background-secondary);
 }
 
 .taskbuffer-view.is-full .taskbuffer-detail {
 	padding: var(--size-4-3) var(--size-4-6);
+	padding-bottom: calc(var(--size-4-3) + var(--taskbuffer-bottom-clearance));
 }
 
 .taskbuffer-detail-empty {

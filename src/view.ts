@@ -385,6 +385,7 @@ abstract class TaskbufferViewBase extends ItemView {
 	private updateDetail(): void {
 		this.detailEl.empty();
 		this.detailEl.toggle(this.showDetail);
+		this.contentEl.toggleClass("is-detail-hidden", !this.showDetail);
 		if (!this.showDetail) return;
 		const row = this.rows[this.selected];
 		if (!row) {
