@@ -1,23 +1,32 @@
 import { describe, it, expect } from "vitest";
-import { FALLBACK_MEASUREMENT, VItem, firstVisibleItem, resolveMeasurement } from "../src/render/virtual";
+import {
+	FALLBACK_MEASUREMENT,
+	SectionMark,
+	VItem,
+	firstVisibleItem,
+	resolveMeasurement,
+	stickyHeader,
+} from "../src/render/virtual";
 
 const SECTION_H = 20;
 const ROW_H = 50;
 
-/** Build positioned items for sections of the given row counts. */
-function layout(counts: Array<[string, number]>): { items: VItem[] } {
+/** Build items + section marks for sections of the given row counts. */
+function layout(counts: Array<[string, number]>): { items: VItem[]; sections: SectionMark[] } {
 	const items: VItem[] = [];
+	const sections: SectionMark[] = [];
 	let top = 0;
 	let rowIndex = 0;
 	for (const [label, n] of counts) {
 		items.push({ top, height: SECTION_H, section: label });
+		sections.push({ top, label });
 		top += SECTION_H;
 		for (let i = 0; i < n; i++) {
 			items.push({ top, height: ROW_H, rowIndex: rowIndex++ });
 			top += ROW_H;
 		}
 	}
-	return { items };
+	return { items, sections };
 }
 
 describe("firstVisibleItem", () => {
@@ -42,6 +51,53 @@ describe("firstVisibleItem", () => {
 
 	it("should return 0 for an empty list", () => {
 		expect(firstVisibleItem([], 100)).toBe(0);
+	});
+});
+
+describe("stickyHeader", () => {
+	// Overdue @0 (rows 20..170), Today @170 (rows 190..290), Later @290.
+	const { sections } = layout([["Overdue", 3], ["Today", 2], ["Later", 1]]);
+
+	it("should pin nothing when the list is not scrolled", () => {
+		expect(stickyHeader(sections, 0, SECTION_H)).toBeNull();
+	});
+
+	it("should pin nothing when there are no sections", () => {
+		expect(stickyHeader([], 300, SECTION_H)).toBeNull();
+	});
+
+	it("should pin the first section when scrolled into its rows", () => {
+		expect(stickyHeader(sections, 60, SECTION_H)).toEqual({ label: "Overdue", offset: 0 });
+	});
+
+	it("should pin the section whose rows are under the top edge when there are many rows", () => {
+		expect(stickyHeader(sections, 200, SECTION_H)).toEqual({ label: "Today", offset: 0 });
+	});
+
+	it("should push the pinned header up when the next header approaches", () => {
+		// Today's header is at 170; at y=160 it sits 10px below the top, so the
+		// 20px pinned Overdue header must slide up by 10.
+		expect(stickyHeader(sections, 160, SECTION_H)).toEqual({ label: "Overdue", offset: -10 });
+	});
+
+	it("should hand over to the next section exactly when its header reaches the top", () => {
+		expect(stickyHeader(sections, 170, SECTION_H)).toEqual({ label: "Today", offset: 0 });
+	});
+
+	it("should never push by more than the header height", () => {
+		const s = stickyHeader(sections, 169.5, SECTION_H);
+		expect(s?.label).toBe("Overdue");
+		expect(s?.offset).toBeGreaterThanOrEqual(-SECTION_H);
+	});
+
+	it("should keep the last section pinned with no offset when scrolled past everything", () => {
+		expect(stickyHeader(sections, 5_000, SECTION_H)).toEqual({ label: "Later", offset: 0 });
+	});
+
+	it("should pin an empty-rowed section correctly when two headers are adjacent", () => {
+		const adjacent = layout([["Overdue", 0], ["Today", 2]]).sections; // Today @20
+		expect(stickyHeader(adjacent, 5, SECTION_H)).toEqual({ label: "Overdue", offset: -5 });
+		expect(stickyHeader(adjacent, 25, SECTION_H)).toEqual({ label: "Today", offset: 0 });
 	});
 });
 

@@ -3,9 +3,10 @@
 // body is vertically centered and may wrap to two lines), but only the rows in
 // (and just around) the viewport are ever in the DOM, so render time is constant
 // no matter how many thousand tasks the vault holds. The selected task's full
-// body, tags, and parsed marker history show in a pinned detail strip. Two
-// concrete views share this base: a compact sidebar dock view and a roomy
-// full-page (main-area) view.
+// body, tags, and parsed marker history show in a pinned detail strip, and the
+// current section's header stays pinned over the top of the list. Two concrete
+// views share this base: a compact sidebar dock view and a roomy full-page
+// (main-area) view.
 
 import { ItemView, WorkspaceLeaf } from "obsidian";
 import { TaskEngine } from "./engine";
@@ -17,9 +18,11 @@ import { describeMarkers } from "./render/markers";
 import { tokenizeInline } from "./render/inline";
 import {
 	Measurement,
+	SectionMark,
 	VItem,
 	firstVisibleItem,
 	resolveMeasurement,
+	stickyHeader,
 } from "./render/virtual";
 import { perfStart } from "./perf";
 
@@ -75,6 +78,7 @@ abstract class TaskbufferViewBase extends ItemView {
 	private rows: DisplayRow[] = []; // selectable task rows, in display order
 	private items: VItem[] = []; // flat section/row items with absolute offsets
 	private rowTop: number[] = []; // rowIndex -> top offset (for scroll-into-view)
+	private sections: SectionMark[] = []; // section headers, for the pinned header
 	private totalHeight = 0;
 	private rowH = 0; // measured uniform row height
 	private sectionH = 0; // measured section-header height
@@ -82,6 +86,7 @@ abstract class TaskbufferViewBase extends ItemView {
 	private trustedMeasurement: Measurement | null = null;
 	/** Set when a render had to lay out without a trustworthy measurement. */
 	private measureStale = true;
+	private sizerTop = 0; // sizer's offset inside the scroll content (viewport padding)
 	private lastWidth = 0; // viewport width at the last relayout (0 = was hidden)
 	private relayoutRaf = 0;
 	private renderedStart = -1;
@@ -94,6 +99,7 @@ abstract class TaskbufferViewBase extends ItemView {
 	private viewportEl!: HTMLElement;
 	private sizerEl!: HTMLElement;
 	private emptyEl!: HTMLElement;
+	private stickyEl!: HTMLElement;
 	private detailEl!: HTMLElement;
 	private helpEl: HTMLElement | null = null;
 
@@ -117,10 +123,14 @@ abstract class TaskbufferViewBase extends ItemView {
 
 		this.filterNoteEl = this.contentEl.createDiv({ cls: "taskbuffer-filter-note" });
 		this.filterNoteEl.hide();
-		this.viewportEl = this.contentEl.createDiv({ cls: "taskbuffer-viewport" });
+		const listEl = this.contentEl.createDiv({ cls: "taskbuffer-list" });
+		this.viewportEl = listEl.createDiv({ cls: "taskbuffer-viewport" });
 		this.sizerEl = this.viewportEl.createDiv({ cls: "taskbuffer-sizer" });
 		this.emptyEl = this.viewportEl.createDiv({ cls: "taskbuffer-empty", text: "No open tasks." });
 		this.emptyEl.hide();
+		// Outside the scroller, so it stays put while the rows move under it.
+		this.stickyEl = listEl.createDiv({ cls: "taskbuffer-section taskbuffer-sticky", attr: { "aria-hidden": "true" } });
+		this.stickyEl.hide();
 		this.detailEl = this.contentEl.createDiv({ cls: "taskbuffer-detail" });
 
 		this.registerDomEvent(this.contentEl, "keydown", (evt) => this.onKeyDown(evt));
@@ -179,6 +189,7 @@ abstract class TaskbufferViewBase extends ItemView {
 			this.render();
 			return;
 		}
+		if (widthChanged) this.syncListGeometry();
 		this.renderWindow(widthChanged);
 	}
 
@@ -211,9 +222,11 @@ abstract class TaskbufferViewBase extends ItemView {
 		this.rows = [];
 		this.items = [];
 		this.rowTop = [];
+		this.sections = [];
 		let top = 0;
 		for (const section of sections) {
 			this.items.push({ top, height: this.sectionH, section: section.label });
+			this.sections.push({ top, label: section.label });
 			top += this.sectionH;
 			for (const row of section.rows) {
 				const rowIndex = this.rows.length;
@@ -267,7 +280,10 @@ abstract class TaskbufferViewBase extends ItemView {
 		this.rowH = m.rowH;
 		this.sectionH = m.sectionH;
 		this.measureStale = m.stale;
-		if (!m.stale) this.trustedMeasurement = { rowH: m.rowH, sectionH: m.sectionH };
+		if (!m.stale) {
+			this.trustedMeasurement = { rowH: m.rowH, sectionH: m.sectionH };
+			this.syncListGeometry();
+		}
 		console.debug("taskbuffer: measure", {
 			probed,
 			rowH: this.rowH,
@@ -276,6 +292,18 @@ abstract class TaskbufferViewBase extends ItemView {
 			width: this.viewportEl.clientWidth,
 			narrow: this.contentEl.hasClass("is-narrow"),
 		});
+	}
+
+	/**
+	 * Read the sizer's place inside the scroller: its top offset (the viewport's
+	 * padding) maps scrollTop to list coordinates, and its left/width line the
+	 * pinned header up with the rows while leaving the scrollbar uncovered.
+	 * Only meaningful while visible — a hidden view reads all zeros.
+	 */
+	private syncListGeometry(): void {
+		this.sizerTop = this.sizerEl.offsetTop;
+		this.stickyEl.style.left = `${this.sizerEl.offsetLeft}px`;
+		this.stickyEl.style.width = `${this.sizerEl.clientWidth}px`;
 	}
 
 	/** Stack tags/date under the body when the pane is too narrow for one line. */
@@ -298,17 +326,19 @@ abstract class TaskbufferViewBase extends ItemView {
 	private renderWindow(force: boolean): void {
 		if (this.rows.length === 0) {
 			this.sizerEl.empty();
+			this.stickyEl.hide();
 			this.renderedStart = this.renderedEnd = -1;
 			return;
 		}
-		const scrollTop = this.viewportEl.scrollTop;
+		const y = this.listY();
 		const vh = this.viewportEl.clientHeight || 600;
 		const overscan = OVERSCAN_ROWS * this.rowH;
-		const start = firstVisibleItem(this.items, scrollTop - overscan);
-		const bottom = scrollTop + vh + overscan;
+		const start = firstVisibleItem(this.items, y - overscan);
+		const bottom = y + vh + overscan;
 		let end = start;
 		while (end < this.items.length && (this.items[end] as VItem).top < bottom) end += 1;
 
+		this.updateSticky(y);
 		if (!force && start === this.renderedStart && end === this.renderedEnd) return;
 		this.renderedStart = start;
 		this.renderedEnd = end;
@@ -321,6 +351,24 @@ abstract class TaskbufferViewBase extends ItemView {
 			else this.renderRow(it);
 		}
 		end_({ items: end - start });
+	}
+
+	/** Scroll offset in list coordinates (the sizer sits below the viewport's padding). */
+	private listY(): number {
+		return this.viewportEl.scrollTop - this.sizerTop;
+	}
+
+	/** Pin the header of the section under the top edge; the next header pushes it up. */
+	private updateSticky(y: number): void {
+		const pinned = stickyHeader(this.sections, y, this.sectionH);
+		if (!pinned) {
+			this.stickyEl.hide();
+			return;
+		}
+		if (this.stickyEl.textContent !== pinned.label) this.stickyEl.setText(pinned.label);
+		this.stickyEl.style.height = `${this.sectionH}px`;
+		this.stickyEl.style.transform = pinned.offset === 0 ? "" : `translateY(${pinned.offset}px)`;
+		this.stickyEl.show();
 	}
 
 	private renderSection(it: VItem): void {
@@ -495,11 +543,14 @@ abstract class TaskbufferViewBase extends ItemView {
 	}
 
 	private scrollSelectedIntoView(): void {
-		const top = this.rowTop[this.selected];
-		if (top === undefined) return;
+		const rowTop = this.rowTop[this.selected];
+		if (rowTop === undefined) return;
+		const top = rowTop + this.sizerTop; // scroll-content coordinates
 		const vh = this.viewportEl.clientHeight || 600;
 		const scrollTop = this.viewportEl.scrollTop;
-		if (top < scrollTop) this.viewportEl.scrollTop = top;
+		// Keep the row clear of the pinned section header.
+		const pinned = this.sections.length > 0 ? this.sectionH : 0;
+		if (top - pinned < scrollTop) this.viewportEl.scrollTop = Math.max(0, top - pinned);
 		else if (top + this.rowH > scrollTop + vh) this.viewportEl.scrollTop = top + this.rowH - vh;
 	}
 

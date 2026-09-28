@@ -22,6 +22,8 @@
 	   Custom properties live here, at low specificity, so the platform rules
 	   below can override them. */
 	--taskbuffer-bottom-clearance: 0px;
+	/* What the pinned section header paints over the rows scrolling under it. */
+	--taskbuffer-surface: var(--background-primary);
 }
 
 /* Core pads every `.workspace-leaf-content .view-content` (0,2,0) — including a
@@ -29,6 +31,15 @@
    manages its own insets (the strips and --taskbuffer-bottom-clearance). */
 .workspace-leaf-content .view-content.taskbuffer-view {
 	padding: 0;
+}
+
+.mod-left-split .taskbuffer-view,
+.mod-right-split .taskbuffer-view {
+	--taskbuffer-surface: var(--background-secondary);
+}
+
+.is-mobile .workspace-drawer .taskbuffer-view {
+	--taskbuffer-surface: var(--mobile-sidebar-background, var(--background-primary));
 }
 
 /* ── bottom clearance (mobile navbar / home indicator) ──────────────────────
@@ -73,9 +84,20 @@
 
 /* ── scrolling viewport + virtual sizer ───────────────────────────────────── */
 
+/* Positioning context for the pinned header, which must sit outside the
+   scroller so it stays put while rows move under it. */
+.taskbuffer-list {
+	position: relative;
+	flex: 1 1 auto;
+	min-height: 0;
+	display: flex;
+	flex-direction: column;
+}
+
 .taskbuffer-viewport {
 	position: relative;
 	flex: 1 1 auto;
+	min-height: 0;
 	overflow-y: auto;
 	overflow-x: hidden;
 	padding: var(--size-4-2) var(--size-4-2);
@@ -130,6 +152,17 @@
 
 .taskbuffer-view.is-full .taskbuffer-section {
 	font-size: var(--font-ui-small);
+}
+
+/* The current section's header, pinned over the top of the list. view.ts sets
+   left/width to the sizer's (clearing the scrollbar), height to the measured
+   header height, and a translateY while the next header pushes it out. */
+.taskbuffer-sticky {
+	top: 0;
+	right: auto;
+	z-index: 2;
+	background-color: var(--taskbuffer-surface);
+	pointer-events: none;
 }
 
 /* ── rows (absolutely positioned, fixed two-line height) ──────────────────── */
