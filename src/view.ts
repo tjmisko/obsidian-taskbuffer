@@ -4,11 +4,12 @@
 // (and just around) the viewport are ever in the DOM, so render time is constant
 // no matter how many thousand tasks the vault holds. The selected task's full
 // body, tags, parsed marker history, and touch-sized action buttons show in a
-// pinned detail strip, and the current section's header stays pinned over the
-// top of the list. Two concrete views share this base: a compact sidebar dock
-// view and a roomy full-page (main-area) view.
+// pinned detail strip; the current section's header stays pinned over the top
+// of the list; a long press (touch) or right-click opens an action sheet. Two
+// concrete views share this base: a compact sidebar dock view and a roomy
+// full-page (main-area) view.
 
-import { ItemView, Platform, WorkspaceLeaf, setIcon } from "obsidian";
+import { ItemView, Menu, Platform, WorkspaceLeaf, setIcon } from "obsidian";
 import { TaskEngine } from "./engine";
 import { TaskbufferSettings } from "./config";
 import { Task } from "./types";
@@ -24,6 +25,7 @@ import {
 	resolveMeasurement,
 	stickyHeader,
 } from "./render/virtual";
+import { LONG_PRESS_DELAY_MS, LONG_PRESS_SLOP_PX, LongPressTracker } from "./gesture";
 import { attachDateOverlay, openDatePicker } from "./datepicker";
 import { DeferDateModal } from "./modals";
 import { perfStart } from "./perf";
@@ -45,6 +47,24 @@ export interface TaskbufferHost {
 const OVERSCAN_ROWS = 8;
 /** Below this container width (px), rows stack tags/date under the body (phones, sidebar). */
 const NARROW_BREAKPOINT = 480;
+/** A contextmenu this soon after a touch long press is the same gesture (Android fires both). */
+const LONG_PRESS_CONTEXTMENU_GRACE_MS = 1000;
+/** Same pulse Obsidian core fires when its own long presses engage. */
+const LONG_PRESS_HAPTIC_MS = 200;
+
+/**
+ * Haptic tick. Obsidian's iOS app backs navigator.vibrate with the native
+ * haptic engine (core calls it for its own long presses), Android vibrates, and
+ * desktop has no motor — so feature-detect and never let it throw.
+ */
+function haptic(ms: number): void {
+	if (typeof navigator.vibrate !== "function") return;
+	try {
+		navigator.vibrate(ms);
+	} catch {
+		/* unsupported: haptics are a nicety */
+	}
+}
 
 /** Rows shown in the keyboard-help overlay. */
 const HELP_KEYS: Array<[string, string]> = [
@@ -106,6 +126,18 @@ abstract class TaskbufferViewBase extends ItemView {
 	private detailEl!: HTMLElement;
 	private helpEl: HTMLElement | null = null;
 
+	// Touch long press: which row is held, and when a press last fired.
+	private longPress = new LongPressTracker({
+		delayMs: LONG_PRESS_DELAY_MS,
+		slopPx: LONG_PRESS_SLOP_PX,
+		setTimer: (fn, ms) => window.setTimeout(fn, ms),
+		clearTimer: (id) => window.clearTimeout(id),
+		onFire: (x, y) => this.onLongPress(x, y),
+	});
+	private pressIndex: number | null = null;
+	private pressEl: HTMLElement | null = null;
+	private lastLongPressAt = 0;
+
 	abstract layoutMode(): LayoutMode;
 
 	constructor(leaf: WorkspaceLeaf, host: TaskbufferHost) {
@@ -138,6 +170,7 @@ abstract class TaskbufferViewBase extends ItemView {
 
 		this.registerDomEvent(this.contentEl, "keydown", (evt) => this.onKeyDown(evt));
 		this.registerDomEvent(this.viewportEl, "scroll", () => this.onScroll());
+		this.registerRowEvents();
 
 		// An inactive tab is display:none, so a render while it is hidden can only
 		// guess row heights. Observing the viewport catches the moment it is shown
@@ -163,6 +196,7 @@ abstract class TaskbufferViewBase extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
+		this.longPress.cancel();
 		if (this.relayoutRaf) cancelAnimationFrame(this.relayoutRaf);
 		this.contentEl.empty();
 	}
@@ -413,12 +447,121 @@ abstract class TaskbufferViewBase extends ItemView {
 		if (row.dateText) meta.createSpan({ cls: "taskbuffer-date", text: row.dateText });
 		if (row.timeText) meta.createSpan({ cls: "taskbuffer-time", text: row.timeText });
 		if (row.durationText) meta.createSpan({ cls: "taskbuffer-duration", text: row.durationText });
+	}
 
-		el.addEventListener("click", () => this.select(index));
-		el.addEventListener("dblclick", () => void this.host.openTaskSource(task));
+	// ── row gestures (delegated: rows are rebuilt on every window paint) ─────────
+
+	private registerRowEvents(): void {
+		this.registerDomEvent(this.sizerEl, "click", (evt) => {
+			const index = this.rowIndexAt(evt.target);
+			if (index !== null) this.select(index);
+		});
+		this.registerDomEvent(this.sizerEl, "dblclick", (evt) => {
+			const task = this.taskAt(this.rowIndexAt(evt.target));
+			if (task) void this.host.openTaskSource(task);
+		});
+		// Right-click on desktop; Android also raises this for a long press, which
+		// the touch tracker has already handled.
+		this.registerDomEvent(this.sizerEl, "contextmenu", (evt) => {
+			const index = this.rowIndexAt(evt.target);
+			if (index === null) return;
+			evt.preventDefault();
+			if (Date.now() - this.lastLongPressAt < LONG_PRESS_CONTEXTMENU_GRACE_MS) return;
+			this.select(index);
+			this.openRowMenu(index, evt.clientX, evt.clientY);
+		});
+		this.registerDomEvent(this.sizerEl, "touchstart", (evt) => this.onTouchStart(evt), { passive: true });
+	}
+
+	/**
+	 * Begin tracking a possible long press. Follow-up touch events always target
+	 * the element the touch started on — even after a repaint detaches it — so
+	 * listen on that element, not on the sizer the events could no longer reach.
+	 */
+	private onTouchStart(evt: TouchEvent): void {
+		this.endPress();
+		const touch = evt.touches[0];
+		const index = this.rowIndexAt(evt.target);
+		const target = evt.target as HTMLElement | null;
+		if (evt.touches.length !== 1 || !touch || index === null || !target || target.closest("input")) return;
+		this.pressIndex = index;
+		this.pressEl = target.closest<HTMLElement>(".taskbuffer-row");
+		this.pressEl?.addClass("is-pressing");
+
+		const listeners = new AbortController();
+		const finish = (): void => {
+			this.endPress();
+			listeners.abort();
+		};
+		target.addEventListener(
+			"touchmove",
+			(e: TouchEvent) => {
+				const t = e.touches[0];
+				if (e.touches.length !== 1 || !t) this.longPress.cancel();
+				else this.longPress.move(t.clientX, t.clientY);
+				if (!this.longPress.pending) this.pressEl?.removeClass("is-pressing");
+			},
+			{ signal: listeners.signal, passive: true },
+		);
+		target.addEventListener(
+			"touchend",
+			(e: TouchEvent) => {
+				// Swallow the click (and the dblclick half) the lift would synthesize:
+				// it would land outside the just-opened menu and close it.
+				if (this.longPress.end()) e.preventDefault();
+				finish();
+			},
+			{ signal: listeners.signal, passive: false },
+		);
+		target.addEventListener("touchcancel", finish, { signal: listeners.signal });
+		this.longPress.start(touch.clientX, touch.clientY);
+	}
+
+	private endPress(): void {
+		this.longPress.cancel();
+		this.pressEl?.removeClass("is-pressing");
+		this.pressEl = null;
+	}
+
+	private onLongPress(x: number, y: number): void {
+		const index = this.pressIndex;
+		this.pressEl?.removeClass("is-pressing");
+		if (index === null || !this.rows[index]) return;
+		this.lastLongPressAt = Date.now();
+		haptic(LONG_PRESS_HAPTIC_MS);
+		this.select(index);
+		this.openRowMenu(index, x, y);
+	}
+
+	private rowIndexAt(target: EventTarget | null): number | null {
+		const rowEl = (target as HTMLElement | null)?.closest?.<HTMLElement>(".taskbuffer-row");
+		if (!rowEl) return null;
+		const index = Number(rowEl.dataset.index);
+		return Number.isInteger(index) && index >= 0 && index < this.rows.length ? index : null;
 	}
 
 	// ── task actions ─────────────────────────────────────────────────────────
+
+	/** Long-press / right-click action sheet. On phones Obsidian shows it as a bottom sheet. */
+	private openRowMenu(index: number, x: number, y: number): void {
+		const task = this.taskAt(index);
+		if (!task) return;
+		const engine = this.host.engine;
+		const today = todayEpoch();
+		const menu = new Menu();
+		const add = (section: string, title: string, icon: string, run: () => void): void => {
+			menu.addItem((item) => item.setSection(section).setTitle(title).setIcon(icon).onClick(run));
+		};
+		add("status", "Complete", "check-circle", () => void this.runTask(task, (t) => engine.complete(t)));
+		add("status", "Mark irrelevant", "circle-slash", () => void this.runTask(task, (t) => engine.markIrrelevant(t)));
+		add("date", "Defer to date…", "calendar-clock", () => this.pickDeferDate(task, x, y));
+		add("date", "Due today", "calendar-check", () => void this.runTask(task, (t) => engine.setDate(t, today)));
+		add("date", "Due tomorrow", "calendar-plus", () => void this.runTask(task, (t) => engine.setDate(t, addDays(today, 1))));
+		add("date", "Due in a week", "calendar-range", () => void this.runTask(task, (t) => engine.setDate(t, addDays(today, 7))));
+		add("timer", "Start timer", "play", () => void this.runTask(task, (t) => engine.startTimer(t)));
+		add("open", "Open note", "file-text", () => void this.host.openTaskSource(task));
+		menu.showAtPosition({ x, y }, this.contentEl.doc);
+	}
 
 	/** Open the native date picker programmatically (desktop, keyboard, menu). */
 	private pickDeferDate(task: Task, x: number, y: number): void {
@@ -591,12 +734,19 @@ abstract class TaskbufferViewBase extends ItemView {
 		else if (this.selected < 0) this.selected = 0;
 	}
 
-	/** Move selection to a specific row, scroll it into view, repaint window + detail. */
+	/**
+	 * Move selection to a specific row, scroll it into view, repaint window +
+	 * detail. Rows already on screen are restyled in place rather than rebuilt,
+	 * so a tap's second half (double tap) and a held touch keep their element.
+	 */
 	private select(index: number): void {
 		if (this.rows.length === 0) return;
 		this.selected = Math.max(0, Math.min(this.rows.length - 1, index));
 		this.scrollSelectedIntoView();
-		this.renderWindow(true);
+		this.renderWindow(false);
+		for (const el of Array.from(this.sizerEl.children) as HTMLElement[]) {
+			if (el.dataset.index !== undefined) el.toggleClass("is-selected", el.dataset.index === String(this.selected));
+		}
 		this.updateDetail();
 	}
 

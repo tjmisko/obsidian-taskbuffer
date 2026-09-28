@@ -228,6 +228,21 @@
 	}
 }
 
+/* Touch: a held row must not start iOS text selection or its callout (the
+   long press opens our action sheet instead), nor flash the tap highlight. */
+.is-mobile .taskbuffer-row {
+	-webkit-touch-callout: none;
+	-webkit-user-select: none;
+	user-select: none;
+	-webkit-tap-highlight-color: transparent;
+}
+
+/* Darkens over the long-press delay, so the hold visibly "charges". */
+.taskbuffer-row.is-pressing {
+	background-color: var(--background-modifier-active-hover, var(--background-modifier-hover));
+	transition: background-color 450ms ease-in;
+}
+
 .taskbuffer-row.is-selected {
 	background-color: var(--background-modifier-active-hover, var(--background-modifier-hover));
 	border-left-color: var(--interactive-accent);
