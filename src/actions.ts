@@ -5,7 +5,7 @@
 // timer verbs (start/stop/complete) and create — which touch the state store or
 // other files — live in the Obsidian layer (TaskStore) on top of these.
 
-import { ParseContext, extractInlineDueDate } from "./parse/parse";
+import { ParseContext, extractInlineDueDate, formatInlineDue, replaceInlineDueDate } from "./parse/parse";
 import { formatMarker } from "./state";
 import * as mutate from "./mutate";
 
@@ -39,6 +39,43 @@ export function defer(content: string, lnum: number, ctx: ParseContext, nowEpoch
 	}
 	const marker = formatMarker("deferral", nowEpoch, ctx);
 	return mutate.appendToLine(c, lnum, marker);
+}
+
+/**
+ * Point a single line's inline due date at `newDateStr`. A dated line keeps its
+ * wrapper and any due time (only the date substring changes); an undated line
+ * gets a time-less due date inserted just before its first marker — where the
+ * parser expects it — or at the end when it has none.
+ */
+export function setDueOnLine(line: string, ctx: ParseContext, newDateStr: string): string {
+	const replaced = replaceInlineDueDate(line, ctx, newDateStr);
+	if (replaced !== null) return replaced;
+	const due = formatInlineDue(newDateStr, ctx);
+	const markerIndex = line.search(ctx.markerStartRegex);
+	if (markerIndex === -1) return trimRightWs(line) + " " + due;
+	return trimRightWs(line.slice(0, markerIndex)) + " " + due + " " + line.slice(markerIndex);
+}
+
+/**
+ * defer-to (no Go counterpart): record the deferral exactly like `defer`
+ * (::original once, then ::deferral), THEN move the due date to `newDateStr`.
+ * Markers first so ::original captures the pre-move date.
+ */
+export function deferTo(content: string, lnum: number, ctx: ParseContext, nowEpoch: number, newDateStr: string): string {
+	const deferred = defer(content, lnum, ctx, nowEpoch);
+	return mapLine(deferred, lnum, (line) => setDueOnLine(line, ctx, newDateStr));
+}
+
+/** Apply `fn` to line `lnum` (1-based) of `content`. */
+export function mapLine(content: string, lnum: number, fn: (line: string) => string): string {
+	const line = lineAt(content, lnum);
+	const lines = content.split("\n");
+	lines[lnum - 1] = fn(line);
+	return lines.join("\n");
+}
+
+function trimRightWs(line: string): string {
+	return line.replace(/[ \t]+$/, "");
 }
 
 /** check (cmdCheck): quick check-off, no marker. Flip open -> done. */

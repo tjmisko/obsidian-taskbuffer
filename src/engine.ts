@@ -6,7 +6,7 @@
 import { App, Notice, normalizePath, TFile } from "obsidian";
 import { TaskbufferSettings } from "./config";
 import { Task } from "./types";
-import { buildParseContext, ParseContext, replaceInlineDueDate } from "./parse/parse";
+import { buildParseContext, extractInlineDueDate, ParseContext, replaceInlineDueDate } from "./parse/parse";
 import { CurrentTask, formatMarker } from "./state";
 import { scanVault, readFileEntry, fileForPath, type FileEntry, type FileReadTiming } from "./scan";
 import {
@@ -449,44 +449,84 @@ export class TaskEngine {
 		}
 	}
 
-	// ── date shift / set today ────────────────────────────────────────────────
+	// ── date shift / set / defer-to ─────────────────────────────────────────────
 
 	async shiftDate(task: Task, deltaDays: number): Promise<void> {
 		if (task.dueDate !== null) {
 			const newDate = formatEpoch(addDays(task.dueDate, deltaDays), this.settings.formats.date);
-			if (await this.replaceLineDate(task, newDate)) return;
+			const ctx = this.ctx;
+			if (await this.rewriteLine(task, (line) => replaceInlineDueDate(line, ctx, newDate))) return;
 		}
 		await this.shiftFrontmatterDue(task, deltaDays);
 	}
 
 	async setDateToday(task: Task): Promise<void> {
-		const today = formatEpoch(todayEpoch(), this.settings.formats.date);
-		if (task.dueDate !== null && (await this.replaceLineDate(task, today))) return;
-		await this.setFrontmatterDueToday(task);
+		await this.setDate(task, todayEpoch());
 	}
 
-	/** Replace the inline due date on the task's line; records an undo edit. */
-	private async replaceLineDate(task: Task, newDateStr: string): Promise<boolean> {
+	/**
+	 * Move the task's due date to `epoch`, writing it where it lives: an inline
+	 * date is replaced in place; a date inherited from frontmatter (or a synthetic
+	 * project task) updates the file's due key; an undated task gets an inline
+	 * due date inserted. Line edits are undoable.
+	 */
+	async setDate(task: Task, epoch: number): Promise<void> {
+		if (task.sortLast) {
+			await this.setFrontmatterDue(task, epoch);
+			return;
+		}
 		const ctx = this.ctx;
-		const file = fileForPath(this.app, task.filePath);
-		if (!file) return false;
+		const dateStr = formatEpoch(epoch, this.settings.formats.date);
+		let inherited = false;
+		await this.rewriteLine(task, (line) => {
+			inherited = task.dueDate !== null && extractInlineDueDate(line, ctx) === null;
+			return inherited ? null : actions.setDueOnLine(line, ctx, dateStr);
+		});
+		if (inherited) await this.setFrontmatterDue(task, epoch);
+	}
+
+	/**
+	 * Defer to a picked date: record ::original/::deferral like `defer`, then move
+	 * the due date to `epoch` (see actions.deferTo). A frontmatter-inherited date
+	 * gets the markers on the line and the new date in frontmatter; a synthetic
+	 * project task has no line to mark, so only its frontmatter moves.
+	 */
+	async deferTo(task: Task, epoch: number): Promise<void> {
+		if (task.sortLast) {
+			await this.setFrontmatterDue(task, epoch);
+			return;
+		}
+		const ctx = this.ctx;
+		const now = this.nowEpoch();
+		const dateStr = formatEpoch(epoch, this.settings.formats.date);
+		let inherited = false;
+		await this.rewriteLine(task, (line) => {
+			inherited = task.dueDate !== null && extractInlineDueDate(line, ctx) === null;
+			return inherited ? actions.defer(line, 1, ctx, now) : actions.deferTo(line, 1, ctx, now, dateStr);
+		});
+		if (inherited) await this.setFrontmatterDue(task, epoch);
+	}
+
+	/**
+	 * Rewrite the task's own line through `fn` (null = leave it alone) in one
+	 * atomic write and record it on the undo stack. Returns whether it changed.
+	 */
+	private async rewriteLine(task: Task, fn: (line: string) => string | null): Promise<boolean> {
 		let edit: LineEdit | null = null;
 		const snapshot = await this.transform(task.filePath, (content) => {
 			const lines = content.split("\n");
-			const ln = lines[task.lineNumber - 1];
-			if (ln === undefined) return content;
-			const replaced = replaceInlineDueDate(ln, ctx, newDateStr);
-			if (replaced === null || replaced === ln) return content;
-			edit = { filePath: task.filePath, lineNumber: task.lineNumber, oldLine: ln, newLine: replaced };
-			lines[task.lineNumber - 1] = replaced;
+			const line = lines[task.lineNumber - 1];
+			if (line === undefined) return content;
+			const next = fn(line);
+			if (next === null || next === line) return content;
+			edit = { filePath: task.filePath, lineNumber: task.lineNumber, oldLine: line, newLine: next };
+			lines[task.lineNumber - 1] = next;
 			return lines.join("\n");
 		});
-		if (edit && snapshot) {
-			this.pushUndo([edit]);
-			await this.updateFileFromContent(snapshot, "mutation");
-			return true;
-		}
-		return false;
+		if (!edit || !snapshot) return false;
+		this.pushUndo([edit]);
+		await this.updateFileFromContent(snapshot, "mutation");
+		return true;
 	}
 
 	private fmDueString(epoch: number, time: string): string {
@@ -509,12 +549,15 @@ export class TaskEngine {
 		if (!changed) new Notice("No due date to shift");
 	}
 
-	private async setFrontmatterDueToday(task: Task): Promise<void> {
+	/** Set the file's frontmatter due date to `epoch`, keeping any existing due time. */
+	private async setFrontmatterDue(task: Task, epoch: number): Promise<void> {
 		const file = fileForPath(this.app, task.filePath);
 		if (!file) return;
 		const dueKey = this.settings.frontmatter.dueKey;
 		await this.app.fileManager.processFrontMatter(file, (fm: Record<string, unknown>) => {
-			fm[dueKey] = formatEpoch(todayEpoch(), "%Y-%m-%d");
+			const raw = fm[dueKey];
+			const parsed = raw === undefined || raw === null ? null : parseFrontmatterDue(raw as string | Date);
+			fm[dueKey] = this.fmDueString(epoch, parsed?.time ?? "");
 		});
 	}
 

@@ -40,6 +40,9 @@ export interface ParseContext {
 	dateSpec: StrftimeSpec;
 	dateRegexTime: RegExp; // group1 = date, group2 = time
 	dateRegexNoTime: RegExp; // group1 = date
+	/** Literal wrapper around a time-less inline due date, for write-back: open + DATE + close. */
+	dueOpen: string;
+	dueClose: string;
 	markerRegexTime: RegExp; // group1 kind, group2 date, group3 time
 	markerRegexNoTime: RegExp; // group1 kind, group2 date
 	markerStartRegex: RegExp;
@@ -156,6 +159,8 @@ export function buildParseContext(
 		dateSpec,
 		dateRegexTime,
 		dateRegexNoTime,
+		dueOpen: open,
+		dueClose: twoElem ? close2 : close2 + (close3 as string),
 		markerRegexTime,
 		markerRegexNoTime,
 		markerStartRegex,
@@ -204,6 +209,11 @@ function pushDateError(ctx: ParseContext, m: RawMatch, dateStr: string, context:
 export function extractInlineDueDate(line: string, ctx: ParseContext): string | null {
 	const dg = findDateGroup(line, ctx);
 	return dg ? dg.dateStr : null;
+}
+
+/** Render a time-less inline due date in the configured wrapper, e.g. `(@[[2026-06-25]])`. */
+export function formatInlineDue(dateStr: string, ctx: ParseContext): string {
+	return ctx.dueOpen + dateStr + ctx.dueClose;
 }
 
 /**
