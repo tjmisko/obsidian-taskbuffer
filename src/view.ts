@@ -3,16 +3,16 @@
 // body is vertically centered and may wrap to two lines), but only the rows in
 // (and just around) the viewport are ever in the DOM, so render time is constant
 // no matter how many thousand tasks the vault holds. The selected task's full
-// body, tags, and parsed marker history show in a pinned detail strip, and the
-// current section's header stays pinned over the top of the list. Two concrete
-// views share this base: a compact sidebar dock view and a roomy full-page
-// (main-area) view.
+// body, tags, parsed marker history, and touch-sized action buttons show in a
+// pinned detail strip, and the current section's header stays pinned over the
+// top of the list. Two concrete views share this base: a compact sidebar dock
+// view and a roomy full-page (main-area) view.
 
-import { ItemView, WorkspaceLeaf } from "obsidian";
+import { ItemView, Platform, WorkspaceLeaf, setIcon } from "obsidian";
 import { TaskEngine } from "./engine";
 import { TaskbufferSettings } from "./config";
 import { Task } from "./types";
-import { todayEpoch } from "./dates";
+import { addDays, todayEpoch } from "./dates";
 import { DisplayRow, RenderOptions } from "./render/rows";
 import { describeMarkers } from "./render/markers";
 import { tokenizeInline } from "./render/inline";
@@ -24,6 +24,8 @@ import {
 	resolveMeasurement,
 	stickyHeader,
 } from "./render/virtual";
+import { attachDateOverlay, openDatePicker } from "./datepicker";
+import { DeferDateModal } from "./modals";
 import { perfStart } from "./perf";
 
 export const VIEW_TYPE_TASKBUFFER = "taskbuffer-view";
@@ -51,7 +53,8 @@ const HELP_KEYS: Array<[string, string]> = [
 	["enter / o", "open task source"],
 	["c", "complete"],
 	["x", "check off (no marker)"],
-	["d", "defer"],
+	["d", "defer (keep date)"],
+	["D", "defer to a date…"],
 	["t", "due today"],
 	["⇧← / ⇧→", "shift due back / forward a day"],
 	["b / S", "start / stop timer"],
@@ -390,9 +393,10 @@ abstract class TaskbufferViewBase extends ItemView {
 			cls: "task-list-item-checkbox taskbuffer-checkbox",
 			attr: { type: "checkbox", "aria-label": "Complete task" },
 		});
+		const task = row.task;
 		checkbox.addEventListener("click", (evt) => {
 			evt.stopPropagation();
-			void this.runOn(index, (task) => this.host.engine.complete(task));
+			void this.runTask(task, (t) => this.host.engine.complete(t));
 		});
 
 		const bodyEl = el.createSpan({ cls: "taskbuffer-body" });
@@ -411,7 +415,62 @@ abstract class TaskbufferViewBase extends ItemView {
 		if (row.durationText) meta.createSpan({ cls: "taskbuffer-duration", text: row.durationText });
 
 		el.addEventListener("click", () => this.select(index));
-		el.addEventListener("dblclick", () => void this.runOn(index, (task) => this.host.openTaskSource(task)));
+		el.addEventListener("dblclick", () => void this.host.openTaskSource(task));
+	}
+
+	// ── task actions ─────────────────────────────────────────────────────────
+
+	/** Open the native date picker programmatically (desktop, keyboard, menu). */
+	private pickDeferDate(task: Task, x: number, y: number): void {
+		const initial = task.dueDate ?? todayEpoch();
+		const defer = (epoch: number): void => void this.runTask(task, (t) => this.host.engine.deferTo(t, epoch));
+		openDatePicker(this.contentEl.doc, x, y, initial, defer, () => new DeferDateModal(this.app, initial, defer).open());
+	}
+
+	/** Touch-sized buttons under the selected task's detail. */
+	private renderActionBar(task: Task): void {
+		const engine = this.host.engine;
+		const today = todayEpoch();
+		const bar = this.detailEl.createDiv({ cls: "taskbuffer-actions" });
+
+		if (Platform.isMobile) {
+			// A tap straight on a date input is the only reliable way to raise
+			// the native picker on iOS; showPicker() there is best-effort. The
+			// control is a <label>, not a <button>: an input inside a button is
+			// invalid and some engines hand the tap to the button instead.
+			const deferEl = this.actionButton(bar, "calendar-clock", "Defer", "Defer to a date", "label");
+			attachDateOverlay(deferEl, task.dueDate ?? today, (epoch) => void this.runTask(task, (t) => engine.deferTo(t, epoch)));
+		} else {
+			const deferBtn = this.actionButton(bar, "calendar-clock", "Defer", "Defer to a date");
+			deferBtn.addEventListener("click", () => {
+				const rect = deferBtn.getBoundingClientRect();
+				this.pickDeferDate(task, rect.left, rect.bottom);
+			});
+		}
+		const buttons: Array<[string, string, string, () => void]> = [
+			["calendar-check", "Today", "Due today", () => void this.runTask(task, (t) => engine.setDate(t, today))],
+			["calendar-plus", "Tomorrow", "Due tomorrow", () => void this.runTask(task, (t) => engine.setDate(t, addDays(today, 1)))],
+			["circle-slash", "Irrelevant", "Mark irrelevant", () => void this.runTask(task, (t) => engine.markIrrelevant(t))],
+			["file-text", "Open", "Open note", () => void this.host.openTaskSource(task)],
+		];
+		for (const [icon, label, ariaLabel, run] of buttons) {
+			this.actionButton(bar, icon, label, ariaLabel).addEventListener("click", run);
+		}
+	}
+
+	private actionButton(
+		parent: HTMLElement,
+		icon: string,
+		label: string,
+		ariaLabel: string,
+		tag: "button" | "label" = "button",
+	): HTMLElement {
+		const attr: Record<string, string> = { "aria-label": ariaLabel };
+		if (tag === "button") attr.type = "button";
+		const btn = parent.createEl(tag, { cls: "taskbuffer-action", attr });
+		setIcon(btn.createSpan({ cls: "taskbuffer-action-icon" }), icon);
+		btn.createSpan({ cls: "taskbuffer-action-label", text: label });
+		return btn;
 	}
 
 	/**
@@ -474,10 +533,11 @@ abstract class TaskbufferViewBase extends ItemView {
 			return;
 		}
 
-		const detailBodyEl = this.detailEl.createDiv({ cls: "taskbuffer-detail-body" });
+		const info = this.detailEl.createDiv({ cls: "taskbuffer-detail-info" });
+		const detailBodyEl = info.createDiv({ cls: "taskbuffer-detail-body" });
 		this.renderBody(detailBodyEl, row.body, row.task.filePath);
 
-		const meta = this.detailEl.createDiv({ cls: "taskbuffer-detail-meta" });
+		const meta = info.createDiv({ cls: "taskbuffer-detail-meta" });
 		if (row.dateText) meta.createSpan({ cls: "taskbuffer-date", text: row.dateText });
 		if (row.timeText) meta.createSpan({ cls: "taskbuffer-time", text: row.timeText });
 		if (row.durationText) meta.createSpan({ cls: "taskbuffer-duration", text: row.durationText });
@@ -487,7 +547,7 @@ abstract class TaskbufferViewBase extends ItemView {
 
 		const log = describeMarkers(row.markers);
 		if (log.length > 0) {
-			const logEl = this.detailEl.createDiv({ cls: "taskbuffer-log" });
+			const logEl = info.createDiv({ cls: "taskbuffer-log" });
 			for (const entry of log) {
 				const item = logEl.createSpan({ cls: "taskbuffer-log-entry" });
 				item.dataset.kind = entry.kind;
@@ -496,6 +556,8 @@ abstract class TaskbufferViewBase extends ItemView {
 				if (entry.when) item.createSpan({ cls: "taskbuffer-log-when", text: entry.when });
 			}
 		}
+
+		this.renderActionBar(row.task);
 	}
 
 	private renderHelp(): void {
@@ -556,10 +618,21 @@ abstract class TaskbufferViewBase extends ItemView {
 
 	// ── action dispatch ──────────────────────────────────────────────────────
 
+	private taskAt(index: number | null): Task | null {
+		return index === null ? null : (this.rows[index]?.task ?? null);
+	}
+
 	private async runOn(index: number, fn: (task: Task) => Promise<void> | void): Promise<void> {
-		const row = this.rows[index];
-		if (!row) return;
-		await fn(row.task);
+		const task = this.taskAt(index);
+		if (task) await this.runTask(task, fn);
+	}
+
+	/**
+	 * Run a verb on a task captured when its button/menu was built — by the time
+	 * the user taps, a re-render may have shifted which task sits at an index.
+	 */
+	private async runTask(task: Task, fn: (task: Task) => Promise<void> | void): Promise<void> {
+		await fn(task);
 		this.render();
 	}
 
@@ -613,6 +686,13 @@ abstract class TaskbufferViewBase extends ItemView {
 			case "d":
 				need((t) => engine.defer(t));
 				break;
+			case "D": {
+				if (!task) break;
+				const rowEl = this.sizerEl.querySelector<HTMLElement>(`.taskbuffer-row[data-index="${this.selected}"]`);
+				const rect = (rowEl ?? this.viewportEl).getBoundingClientRect();
+				this.pickDeferDate(task, rect.left + rect.width / 2, rect.bottom);
+				break;
+			}
 			case "i":
 				need((t) => engine.markIrrelevant(t));
 				break;

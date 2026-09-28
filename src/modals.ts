@@ -1,5 +1,6 @@
 // modals.ts — small dialogs: quick-create a task, and the OR tag filter picker.
 import { App, Modal, Setting } from "obsidian";
+import { addDays, epochToIsoDate, isoDateToEpoch, todayEpoch } from "./dates";
 
 /** Prompt for a task body and hand it back. */
 export class CreateTaskModal extends Modal {
@@ -40,6 +41,54 @@ export class CreateTaskModal extends Modal {
 		if (body === "") return;
 		this.close();
 		this.onSubmit(body);
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+	}
+}
+
+/**
+ * Fallback date picker for defer-to-date, used only where the platform refuses
+ * to open its native picker programmatically. The date field is still a native
+ * `<input type="date">`, so tapping it raises the OS calendar.
+ */
+export class DeferDateModal extends Modal {
+	private epoch: number;
+	private onPick: (epoch: number) => void;
+
+	constructor(app: App, initialEpoch: number, onPick: (epoch: number) => void) {
+		super(app);
+		this.epoch = initialEpoch;
+		this.onPick = onPick;
+	}
+
+	onOpen(): void {
+		this.setTitle("Defer to date");
+		const { contentEl } = this;
+		new Setting(contentEl).setName("Date").addText((text) => {
+			text.inputEl.type = "date";
+			text.setValue(epochToIsoDate(this.epoch));
+			text.onChange((v) => {
+				const epoch = isoDateToEpoch(v);
+				if (epoch !== null) this.epoch = epoch;
+			});
+		});
+		const quick = new Setting(contentEl);
+		for (const [label, days] of [["Tomorrow", 1], ["Next week", 7]] as const) {
+			quick.addButton((btn) => btn.setButtonText(label).onClick(() => this.submit(addDays(todayEpoch(), days))));
+		}
+		quick.addButton((btn) =>
+			btn
+				.setButtonText("Defer")
+				.setCta()
+				.onClick(() => this.submit(this.epoch)),
+		);
+	}
+
+	private submit(epoch: number): void {
+		this.close();
+		this.onPick(epoch);
 	}
 
 	onClose(): void {

@@ -59,3 +59,21 @@ export function isValidYMD(year: number, month: number, day: number): boolean {
 export function weekday(epoch: number): number {
 	return new Date(epoch).getDay();
 }
+
+/** `YYYY-MM-DD` for a task epoch — the wire format of `<input type="date">`. */
+export function epochToIsoDate(epoch: number): string {
+	const { year, month, day } = epochToYMD(epoch);
+	return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+/**
+ * Task epoch for an `<input type="date">` value, or null when it is empty (the
+ * picker's Clear button) or not a real calendar date.
+ */
+export function isoDateToEpoch(value: string): number | null {
+	const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+	if (!m) return null;
+	const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+	if (!isValidYMD(year, month, day)) return null;
+	return ymdToEpoch(year, month, day);
+}

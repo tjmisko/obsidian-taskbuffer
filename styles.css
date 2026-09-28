@@ -328,8 +328,8 @@
 
 .taskbuffer-detail {
 	flex: 0 0 auto;
-	max-height: 9rem;
-	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
 	padding: var(--size-4-2) var(--size-4-3);
 	padding-bottom: calc(var(--size-4-2) + var(--taskbuffer-bottom-clearance));
 	border-top: 1px solid var(--background-modifier-border);
@@ -339,6 +339,12 @@
 .taskbuffer-view.is-full .taskbuffer-detail {
 	padding: var(--size-4-3) var(--size-4-6);
 	padding-bottom: calc(var(--size-4-3) + var(--taskbuffer-bottom-clearance));
+}
+
+/* Body/meta/history scroll on their own so the action bar never scrolls away. */
+.taskbuffer-detail-info {
+	max-height: 7rem;
+	overflow-y: auto;
 }
 
 .taskbuffer-detail-empty {
@@ -398,6 +404,105 @@
 
 .taskbuffer-log-when {
 	font-family: var(--font-monospace);
+}
+
+/* ── action bar (selected task) ───────────────────────────────────────────── */
+
+.taskbuffer-actions {
+	display: grid;
+	grid-template-columns: repeat(5, minmax(0, 1fr));
+	gap: var(--size-2-1);
+	margin-top: var(--size-4-2);
+}
+
+/* Phones: the strip is a toolbar, so trade the roomy full-view inset for
+   label width (five labels must fit ~360px). */
+.taskbuffer-view.is-full.is-narrow .taskbuffer-detail {
+	padding-left: var(--size-4-3);
+	padding-right: var(--size-4-3);
+}
+
+/* Plain, flat, touch-sized (≥44px) targets; out-ranks core button chrome. */
+.taskbuffer-actions .taskbuffer-action {
+	position: relative;
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	justify-content: center;
+	gap: var(--size-2-1);
+	height: auto;
+	min-height: 44px;
+	min-width: 0;
+	margin: 0;
+	padding: var(--size-2-2) 0;
+	border: none;
+	border-radius: var(--radius-s);
+	background-color: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.1;
+	cursor: pointer;
+	overflow: hidden;
+	-webkit-tap-highlight-color: transparent;
+}
+
+@media (hover: hover) {
+	.taskbuffer-actions .taskbuffer-action:hover {
+		background-color: var(--background-modifier-hover);
+		color: var(--text-normal);
+	}
+}
+
+.taskbuffer-actions .taskbuffer-action:active {
+	background-color: var(--background-modifier-active-hover, var(--background-modifier-hover));
+}
+
+.taskbuffer-action-icon {
+	display: flex;
+	--icon-size: var(--icon-s);
+}
+
+.taskbuffer-action-label {
+	max-width: 100%;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* Mobile Defer: a transparent date input over the whole control, so the tap
+   lands on the input and the OS raises its native picker. 16px text keeps iOS
+   from zooming the page when the input takes focus. The element + attribute
+   selector out-ranks core's `input[type='date']` padding/border/font-size. */
+.taskbuffer-actions input.taskbuffer-date-overlay[type="date"] {
+	position: absolute;
+	inset: 0;
+	display: block;
+	width: 100%;
+	height: 100%;
+	min-width: 0;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	opacity: 0;
+	font-size: 16px;
+	-webkit-appearance: none;
+	appearance: none;
+	cursor: pointer;
+	z-index: 1;
+}
+
+/* Programmatic picker anchor (showPicker): present and positioned, never seen. */
+input.taskbuffer-date-floating[type="date"] {
+	position: fixed;
+	width: 1px;
+	height: 1px;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	opacity: 0;
+	font-size: 16px;
+	pointer-events: none;
 }
 
 /* ── keyboard help overlay ────────────────────────────────────────────────── */

@@ -1,5 +1,15 @@
 import { describe, it, expect } from "vitest";
-import { ymdToEpoch, epochToYMD, addDays, daysInMonth, isValidYMD, todayEpoch, weekday } from "../src/dates";
+import {
+	ymdToEpoch,
+	epochToYMD,
+	addDays,
+	daysInMonth,
+	isValidYMD,
+	todayEpoch,
+	weekday,
+	epochToIsoDate,
+	isoDateToEpoch,
+} from "../src/dates";
 
 describe("date helpers", () => {
 	it("round-trips ymd <-> epoch at local noon", () => {
@@ -40,5 +50,39 @@ describe("date helpers", () => {
 	it("computes weekday (0=Sun)", () => {
 		expect(weekday(ymdToEpoch(2026, 6, 21))).toBe(0); // Sunday
 		expect(weekday(ymdToEpoch(2026, 6, 22))).toBe(1); // Monday
+	});
+});
+
+describe("date input conversion", () => {
+	it("should format a task epoch as zero-padded YYYY-MM-DD", () => {
+		expect(epochToIsoDate(ymdToEpoch(2026, 3, 7))).toBe("2026-03-07");
+	});
+
+	it("should parse a date input value to local noon on that day", () => {
+		expect(isoDateToEpoch("2026-03-07")).toBe(ymdToEpoch(2026, 3, 7));
+	});
+
+	it("should round-trip across a leap day and year boundary", () => {
+		for (const [y, m, d] of [[2028, 2, 29], [2026, 12, 31], [2027, 1, 1]] as const) {
+			expect(isoDateToEpoch(epochToIsoDate(ymdToEpoch(y, m, d)))).toBe(ymdToEpoch(y, m, d));
+		}
+	});
+
+	it("should return null when the picker was cleared (empty value)", () => {
+		expect(isoDateToEpoch("")).toBeNull();
+	});
+
+	it("should return null when the value is not a real calendar date", () => {
+		expect(isoDateToEpoch("2026-02-30")).toBeNull();
+		expect(isoDateToEpoch("2027-02-29")).toBeNull();
+		expect(isoDateToEpoch("2026-13-01")).toBeNull();
+		expect(isoDateToEpoch("2026-00-10")).toBeNull();
+	});
+
+	it("should return null when the value is malformed or has an expanded year", () => {
+		expect(isoDateToEpoch("2026-3-7")).toBeNull();
+		expect(isoDateToEpoch("+012026-03-07")).toBeNull();
+		expect(isoDateToEpoch("2026-03-07T00:00")).toBeNull();
+		expect(isoDateToEpoch(" 2026-03-07")).toBeNull();
 	});
 });
