@@ -72,6 +72,13 @@
 	--taskbuffer-bottom-clearance: var(--safe-area-inset-bottom, 0px);
 }
 
+/* Sidebar drawer: the navbar is not over it, and the drawer's own footer (view
+   switcher, file/sync row) sits below the view and clears the home indicator.
+   Extra specificity out-ranks every platform rule above. */
+.is-mobile .workspace-drawer .view-content.taskbuffer-view {
+	--taskbuffer-bottom-clearance: 0px;
+}
+
 /* ── filter banner (non-scrolling header) ─────────────────────────────────── */
 
 .taskbuffer-filter-note {
