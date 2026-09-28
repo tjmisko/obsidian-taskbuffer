@@ -41,12 +41,27 @@ view:
 
 - **Click the checkbox** to complete a task (records a completion time).
 - **Double-click a row** (or press `Enter`) to jump to the source line.
+- **Tap a row** to select it. The strip at the bottom shows its full text and
+  history, plus buttons: **Defer** (opens the native date picker), **Today**,
+  **Tomorrow**, **Irrelevant**, and **Open**.
+- **Long-press a row** (touch, with a haptic tick) or **right-click** it for an
+  action menu: complete, mark irrelevant, defer to a date, due today / tomorrow /
+  in a week, start timer, open note.
+- The current section's header stays pinned at the top while you scroll, so you
+  always know whether you're in Overdue, Today, and so on.
 - **Toolbar** buttons: new task, tag filter, toggle undated, toggle markers, reset, refresh.
 - **Keyboard** (when the view is focused): `j`/`k` move · `Enter` open · `c`
-  complete · `x` check off · `d` defer · `i` irrelevant · `u` undo irrelevant ·
-  `b` start timer · `S` stop timer · `t` set due to today · `Shift`+`←`/`→` shift
-  due ±1 day · `m` toggle markers · `#` filter tags · `z`/`Z` undo/redo a date
-  change · `r` refresh.
+  complete · `x` check off · `d` defer (keep the date) · `D` defer to a picked
+  date · `i` irrelevant · `u` undo irrelevant · `b` start timer · `S` stop timer ·
+  `t` set due to today · `Shift`+`←`/`→` shift due ±1 day · `m` toggle markers ·
+  `#` filter tags · `z`/`Z` undo/redo a date change · `r` refresh.
+
+**Defer to a date** records the deferral the same way `d` does (an
+`::original` marker the first time, then `::deferral`) and then moves the due
+date. Setting a date follows the date to wherever it lives: an inline date is
+rewritten in place, a date inherited from frontmatter updates the note's `due`
+key, and an undated task gets an inline due date added. Line edits can be
+undone with `z`.
 
 Every action is also a command (searchable in the command palette and bindable to
 your own hotkeys — no default hotkeys are set). Commands prefixed with "at cursor"
