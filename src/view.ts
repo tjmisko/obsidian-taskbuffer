@@ -15,6 +15,12 @@ import { todayEpoch } from "./dates";
 import { DisplayRow, RenderOptions } from "./render/rows";
 import { describeMarkers } from "./render/markers";
 import { tokenizeInline } from "./render/inline";
+import {
+	Measurement,
+	VItem,
+	firstVisibleItem,
+	resolveMeasurement,
+} from "./render/virtual";
 import { perfStart } from "./perf";
 
 export const VIEW_TYPE_TASKBUFFER = "taskbuffer-view";
@@ -29,14 +35,6 @@ export interface TaskbufferHost {
 	openTaskSource(task: Task): Promise<void>;
 	openCreateModal(): void;
 	openTagFilter(current: string[], onApply: (tags: string[]) => void): void;
-}
-
-/** A flat, positioned render item. `rowIndex === undefined` means a section header. */
-interface VItem {
-	top: number;
-	height: number;
-	section?: string;
-	rowIndex?: number;
 }
 
 const OVERSCAN_ROWS = 8;
@@ -80,6 +78,12 @@ abstract class TaskbufferViewBase extends ItemView {
 	private totalHeight = 0;
 	private rowH = 0; // measured uniform row height
 	private sectionH = 0; // measured section-header height
+	/** Last measurement taken while the view was visible; survives hidden renders. */
+	private trustedMeasurement: Measurement | null = null;
+	/** Set when a render had to lay out without a trustworthy measurement. */
+	private measureStale = true;
+	private lastWidth = 0; // viewport width at the last relayout (0 = was hidden)
+	private relayoutRaf = 0;
 	private renderedStart = -1;
 	private renderedEnd = -1;
 	private scrollRaf = 0;
@@ -122,25 +126,60 @@ abstract class TaskbufferViewBase extends ItemView {
 		this.registerDomEvent(this.contentEl, "keydown", (evt) => this.onKeyDown(evt));
 		this.registerDomEvent(this.viewportEl, "scroll", () => this.onScroll());
 
+		// An inactive tab is display:none, so a render while it is hidden can only
+		// guess row heights. Observing the viewport catches the moment it is shown
+		// again (0 → real size), however Obsidian brings it back. The relayout runs
+		// on the next frame: rendering inside the callback can resize the viewport
+		// again and trip the "ResizeObserver loop" error.
+		const resizeObserver = new ResizeObserver(() => {
+			if (this.relayoutRaf) return;
+			this.relayoutRaf = requestAnimationFrame(() => {
+				this.relayoutRaf = 0;
+				this.relayout();
+			});
+		});
+		resizeObserver.observe(this.viewportEl);
+		this.register(() => resizeObserver.disconnect());
+
 		this.render();
 		window.setTimeout(() => {
 			this.contentEl.focus();
-			this.onResize(); // viewport now has a real size; narrow state may flip
+			this.relayout(); // viewport now has a real size; narrow state may flip
 		}, 0);
 		end();
 	}
 
 	async onClose(): Promise<void> {
+		if (this.relayoutRaf) cancelAnimationFrame(this.relayoutRaf);
 		this.contentEl.empty();
 	}
 
 	onResize(): void {
-		// Crossing the narrow breakpoint changes the uniform row height, which
-		// invalidates the whole item layout; otherwise repainting the window is enough.
+		this.relayout();
+	}
+
+	/**
+	 * React to a size change. Hidden (zero width): nothing to do until shown.
+	 * Crossing the narrow breakpoint changes the uniform row height, and a stale
+	 * measurement (taken while hidden) was never right — both need a full
+	 * re-layout. A width change (including being shown again) repaints every
+	 * row; a height-only change (the detail strip grew) just widens the window.
+	 */
+	private relayout(): void {
+		const width = this.viewportEl.clientWidth;
+		if (width === 0) {
+			this.lastWidth = 0;
+			return;
+		}
+		const widthChanged = width !== this.lastWidth;
+		this.lastWidth = width;
 		const wasNarrow = this.contentEl.hasClass("is-narrow");
 		this.updateNarrow();
-		if (this.contentEl.hasClass("is-narrow") !== wasNarrow) this.render();
-		else this.renderWindow(true);
+		if (this.measureStale || this.contentEl.hasClass("is-narrow") !== wasNarrow) {
+			this.render();
+			return;
+		}
+		this.renderWindow(widthChanged);
 	}
 
 	clearFilter(): void {
@@ -221,12 +260,19 @@ abstract class TaskbufferViewBase extends ItemView {
 		body.appendText("Probe");
 		row.createSpan({ cls: "taskbuffer-tags" }).createSpan({ cls: "taskbuffer-tag", text: "#probe" });
 		row.createSpan({ cls: "taskbuffer-meta" }).createSpan({ cls: "taskbuffer-date", text: "2026-01-01" });
-		this.sectionH = section.offsetHeight || 22;
-		this.rowH = row.offsetHeight || 44;
+		const probed = { rowH: row.offsetHeight, sectionH: section.offsetHeight };
 		probe.remove();
+
+		const m = resolveMeasurement(probed, this.trustedMeasurement);
+		this.rowH = m.rowH;
+		this.sectionH = m.sectionH;
+		this.measureStale = m.stale;
+		if (!m.stale) this.trustedMeasurement = { rowH: m.rowH, sectionH: m.sectionH };
 		console.debug("taskbuffer: measure", {
+			probed,
 			rowH: this.rowH,
 			sectionH: this.sectionH,
+			stale: m.stale,
 			width: this.viewportEl.clientWidth,
 			narrow: this.contentEl.hasClass("is-narrow"),
 		});
@@ -248,19 +294,6 @@ abstract class TaskbufferViewBase extends ItemView {
 		});
 	}
 
-	/** Smallest item index whose bottom edge is below `y`. Items are sorted by top. */
-	private firstVisible(y: number): number {
-		let lo = 0;
-		let hi = this.items.length;
-		while (lo < hi) {
-			const mid = (lo + hi) >> 1;
-			const it = this.items[mid] as VItem;
-			if (it.top + it.height > y) hi = mid;
-			else lo = mid + 1;
-		}
-		return lo;
-	}
-
 	/** Render only the items inside the viewport (+overscan). Cheap; called every frame. */
 	private renderWindow(force: boolean): void {
 		if (this.rows.length === 0) {
@@ -271,7 +304,7 @@ abstract class TaskbufferViewBase extends ItemView {
 		const scrollTop = this.viewportEl.scrollTop;
 		const vh = this.viewportEl.clientHeight || 600;
 		const overscan = OVERSCAN_ROWS * this.rowH;
-		const start = this.firstVisible(scrollTop - overscan);
+		const start = firstVisibleItem(this.items, scrollTop - overscan);
 		const bottom = scrollTop + vh + overscan;
 		let end = start;
 		while (end < this.items.length && (this.items[end] as VItem).top < bottom) end += 1;
